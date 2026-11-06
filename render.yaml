@@ -1,0 +1,14 @@
+# Render Blueprint — KazumiWeb free web service (Docker, no card)
+# Deploy: connect this repo in Render Dashboard -> New -> Web Service,
+# or `render blueprint launch` with this file. Free plan sleeps after
+# 15 min idle (cold start ~1 min on next visit).
+services:
+  - type: web
+    name: kazumi-web
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: KAZUMI_WEB_HEADLESS
+        value: "1"
