@@ -320,8 +320,22 @@ class DualSubLayer {
     this.mode = "ja-zh";
     try { this.mode = localStorage.getItem("dualSubMode") || "ja-zh"; } catch (_) {}
     if (!["ja-zh", "en-zh", "zh", "off"].includes(this.mode)) this.mode = "ja-zh";
+    // 真机问题（2026-11-07）：用户只看到画面硬字幕、日文叠加没出来——
+    // 手机上存的 dualSubMode 可能是之前误触留下的“仅中文/关”，叠加层就一直
+    // 藏着。按用户要求默认就是双语：存过“仅中文/关”的只重置一次（迁移标记），
+    // 之后用户在下拉里主动切的档位仍然保留、不再动。
+    try {
+      if (!localStorage.getItem("dualSubModeMigrated20261107")) {
+        if (this.mode === "zh" || this.mode === "off") {
+          this.mode = "ja-zh";
+          localStorage.setItem("dualSubMode", "ja-zh");
+        }
+        localStorage.setItem("dualSubModeMigrated20261107", "1");
+      }
+    } catch (_) {}
     this.ovlCues = []; this.zhCues = []; this.loaded = false; this.loadError = "";
     this.subSource = ""; // 字幕来源（Kitsunekko / TVsubtitles / Groq Whisper / 机器生成），端点经 X-Sub-Source 返回
+    this.ovlUrl = ""; // 实际拿到叠加字幕的地址（端点或静态文件），给原生 <track> 用
     this.node = document.createElement("div");
     this.node.className = "dual-sub";
     this.ovlNode = document.createElement("div");
@@ -365,13 +379,14 @@ class DualSubLayer {
         const r = await fetch(url, { signal: ctrl.signal });
         if (!r.ok) return null;
         const src = r.headers ? (r.headers.get("X-Sub-Source") || "") : "";
-        return { text: await r.text(), source: src };
+        return { text: await r.text(), source: src, url };
       } catch (e) { return null; } finally { clearTimeout(timer); }
     };
     let got = await fetchText(this.entry.ovl, 5000);
     if (!got) got = await fetchText(this.entry.ovlStatic, 5000);
     if (!got) { this.entry = null; this.done = true; this.render(); if (typeof this.onReady === "function") this.onReady(); return; }
     ovlText = got.text;
+    this.ovlUrl = got.url || "";
     this.subSource = got.source || "";
     try {
       let zhText = "";
@@ -386,9 +401,38 @@ class DualSubLayer {
       this.loaded = this.ovlCues.length > 0;
       if (!this.loaded) this.loadError = "字幕文件为空（" + this.dualLabel + "叠加 " + this.ovlCues.length + " 条）";
     } catch (e) { this.loadError = String(e && e.message || e); }
+    if (this.loaded && this.ovlUrl) this.attachTrack();
     this.done = true;
     this.render();
     if (typeof this.onReady === "function") this.onReady();
+  }
+  attachTrack() {
+    // iOS 原生全屏里 HTML 叠加层看不见（系统播放器只认 <track>）：把同一份
+    // 叠加字幕挂成原生字幕轨，进原生全屏也能看到原语言字幕。
+    // 平时 track 保持 disabled（走 HTML 叠加层，避免重影）；只在原生全屏/
+    // 真全屏时切成 showing。不加 default，避免内嵌播放时原生轨和叠加层重影。
+    try {
+      const old = this.video && this.video.querySelector("track[data-dual-sub]");
+      if (old) old.remove();
+      const tr = document.createElement("track");
+      tr.setAttribute("data-dual-sub", "");
+      tr.kind = "subtitles";
+      tr.label = this.dualLabel;
+      tr.srclang = this.ovlLang;
+      tr.src = this.ovlUrl;
+      this.video.appendChild(tr);
+      const syncMode = () => {
+        try {
+          const showing = inWebkitFullscreen(this.video) || !!document.fullscreenElement;
+          if (tr.track) tr.track.mode = showing ? "showing" : "disabled";
+        } catch (_) {}
+      };
+      tr.addEventListener("load", syncMode);
+      this.video.addEventListener("webkitbeginfullscreen", syncMode);
+      this.video.addEventListener("webkitendfullscreen", syncMode);
+      document.addEventListener("fullscreenchange", syncMode);
+      syncMode();
+    } catch (_) {}
   }
   setMode(mode) {
     this.mode = mode;
@@ -412,6 +456,7 @@ class DualSubLayer {
   dispose() {
     try { this.video.removeEventListener("timeupdate", this._onTime); } catch (_) {}
     try { this.video.removeEventListener("seeked", this._onTime); } catch (_) {}
+    try { const tr = this.video && this.video.querySelector("track[data-dual-sub]"); if (tr) tr.remove(); } catch (_) {}
     try { this.node.remove(); } catch (_) {}
   }
 }
@@ -609,9 +654,16 @@ async function togglePictureInPicture(video) {
   }
 }
 
-// ====== 双击快进 / 快退（触屏双击 + 桌面双击） ======
-// 单击不动（留给原生控件）；300ms 内在同一区域点两下才触发。
-// 左 1/3 快退 10 秒，右 1/3 快进 10 秒，中间双击切换播放/暂停。
+// ====== 点按快进 / 快退（触屏 + 鼠标，单击双击分开判断） ======
+// 真机问题（2026-11-07）：① iOS 不触发 dblclick（双击触发缩放），且 video
+// 原生点按会立即暂停/播放——双击的第一下先暂停，快进就出不来；② 点按直接
+// 落在 video 上会弹 iOS 原生控制层（顶部两条栏、底部进度条、中间大暂停键
+// 和两个 ±10 秒键、右下角圆形设置键），挡住画面。
+// 做法：视频上方盖一层 .tap-zone（只盖视频区，底部留 52px 给原生控制条
+//  scrub 用），点按落在它上面，不碰 video 元素本身，原生控制层不会弹出来；
+// 点一下先等 280ms：280ms 内又来一下 = 双击（左 1/3 快退 10 秒、右 1/3
+// 快进 10 秒、中间暂停/播放）；没来第二下 = 单击暂停/播放。
+// 快进/快退只闪 seek-flash 小提示（“快进 10 秒”），不弹大控制层，视频继续播。
 let _seekFlashTimer = null;
 function showSeekFlash(wrap, text) {
   let n = wrap.querySelector(".seek-flash");
@@ -621,43 +673,91 @@ function showSeekFlash(wrap, text) {
   clearTimeout(_seekFlashTimer);
   _seekFlashTimer = setTimeout(() => n.classList.remove("is-show"), 700);
 }
-function bindDoubleTapSeek(video, wrap) {
-  let lastTap = 0, lastX = 0, lastY = 0;
-  const handleDouble = (x, y) => {
+// 快进/快退后立刻收起内嵌原生控制条（controls 开关一次，控制条隐藏；
+// 60ms 后恢复 controls，控制条只在用户下次点按视频时再出现）。
+function hideInlineControls(video) {
+  try {
+    if (!video || !video.controls) return;
+    video.controls = false;
+    setTimeout(() => { try { video.controls = true; } catch (_) {} }, 60);
+  } catch (_) {}
+}
+function seekBy(video, wrap, delta) {
+  if (!video) return;
+  video.currentTime = Math.max(0, video.currentTime + delta);
+  showSeekFlash(wrap, delta > 0 ? "快进 10 秒" : "快退 10 秒");
+  hideInlineControls(video);
+}
+function bindTapSeek(video, wrap) {
+  let zone = wrap.querySelector(".tap-zone");
+  if (!zone) { zone = el("div", { class: "tap-zone" }); wrap.append(zone); }
+  let pending = null, pendingX = 0, pendingY = 0;
+  const togglePlay = () => {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  };
+  const doDouble = (x, y) => {
     const r = wrap.getBoundingClientRect();
     const relX = (x - r.left) / Math.max(1, r.width);
-    if (relX < 0.34) { video.currentTime = Math.max(0, video.currentTime - 10); showSeekFlash(wrap, "快退 10 秒"); }
-    else if (relX > 0.66) { video.currentTime = video.currentTime + 10; showSeekFlash(wrap, "快进 10 秒"); }
-    else if (video.paused) video.play(); else video.pause();
+    if (relX < 0.34) seekBy(video, wrap, -10);
+    else if (relX > 0.66) seekBy(video, wrap, 10);
+    else togglePlay();
   };
   const onTap = (x, y) => {
-    const now = Date.now();
-    if (now - lastTap < 350 && Math.abs(x - lastX) < 60 && Math.abs(y - lastY) < 60) {
-      lastTap = 0;
-      handleDouble(x, y);
-    } else { lastTap = now; lastX = x; lastY = y; }
+    if (pending) {
+      const dx = x - pendingX, dy = y - pendingY;
+      clearTimeout(pending); pending = null;
+      if (Math.abs(dx) < 60 && Math.abs(dy) < 60) { doDouble(x, y); return; }
+    }
+    pendingX = x; pendingY = y;
+    pending = setTimeout(() => { pending = null; togglePlay(); }, 280);
   };
-  wrap.addEventListener("touchend", (ev) => {
+  let lastTouchEnd = 0;
+  zone.addEventListener("touchend", (ev) => {
+    ev.preventDefault(); // 阻止合成 click 与 iOS 双击缩放
     if (!ev.changedTouches || !ev.changedTouches.length) return;
     const t = ev.changedTouches[0];
+    lastTouchEnd = Date.now();
     onTap(t.clientX, t.clientY);
-  }, { passive: true });
-  wrap.addEventListener("dblclick", (ev) => handleDouble(ev.clientX, ev.clientY));
+  }, { passive: false });
+  zone.addEventListener("click", (ev) => {
+    if (Date.now() - lastTouchEnd < 600) return; // 触屏合成的 click，忽略
+    onTap(ev.clientX, ev.clientY);
+  });
 }
 
 // ====== 一键横屏 ======
-// 有 screen.orientation.lock 的浏览器：真全屏 + 锁横屏。
-// iOS Safari 没有这个 API：改用 CSS 旋转全屏（把播放器旋转 90° 铺满屏幕），
-// 点一下就是横屏，不用再手动横过手机；再点“横屏”或“退出横屏”恢复。
+// 真机问题（2026-11-07）：iOS 上横屏按钮无效，且 iOS 原生全屏
+// （webkit presentation mode）会接管播放——HTML 叠加层（双语字幕、点按层、
+// 快进提示）全消失，点按还会弹 iOS 自带的控制层（顶部两条栏、底部进度条、
+// 中间大暂停键和两个 ±10 秒键、右下角圆形设置键），JS 关不掉。
+// 所以 iOS 上一律走 CSS 旋转全屏（把播放器旋转 90° 铺满屏幕）：点一下就是
+// 横屏，不用再手动横过手机；字幕和点按层都在，控制层由我们自己管。
+// 桌面端仍走真全屏 + screen.orientation.lock。
+// 若视频已在 iOS 原生全屏里（用户点了视频自带的全屏键），先退出它再旋转，
+// 否则旋转后的 wrap 会被原生全屏层盖住、看起来像“按钮无效”。
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 function setLandscapeLabel(btn, text) {
   if (!btn) return;
   const label = btn.querySelector(".label");
   if (label) label.textContent = text;
 }
+function inWebkitFullscreen(video) {
+  try { return video && video.webkitPresentationMode === "fullscreen"; } catch (_) { return false; }
+}
 async function toggleLandscape(video, wrap, btn) {
   if (wrap.classList.contains("is-rotated")) { exitRotated(wrap, btn); return; }
   if (document.fullscreenElement) { await document.exitFullscreen().catch(() => {}); setLandscapeLabel(btn, "横屏"); return; }
+  if (inWebkitFullscreen(video)) {
+    try { video.webkitExitFullscreen(); } catch (_) {}
+    // 等原生全屏退出（webkitendfullscreen）再旋转，避免两层叠加
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      video.addEventListener("webkitendfullscreen", finish, { once: true });
+      setTimeout(finish, 800);
+    });
+  }
   if (!IS_IOS && document.fullscreenEnabled && wrap.requestFullscreen) {
     try {
       await wrap.requestFullscreen();
@@ -677,6 +777,18 @@ async function toggleLandscape(video, wrap, btn) {
     } catch (_) { /* 掉到 CSS 旋转方案 */ }
   }
   enterRotated(wrap, btn);
+}
+// 拦截视频自带的全屏键：iOS 内嵌控制条上的全屏键会进原生全屏（叠加层全丢、
+// 控制层关不掉），直接退出它、改走 CSS 旋转横屏。
+function bindNativeFullscreenGuard(video, wrap, btn) {
+  if (!video || typeof video.webkitEnterFullscreen !== "function") return;
+  video.addEventListener("webkitbeginfullscreen", () => {
+    try { video.webkitExitFullscreen(); } catch (_) {}
+    if (!wrap.classList.contains("is-rotated")) enterRotated(wrap, btn);
+  });
+  video.addEventListener("webkitendfullscreen", () => {
+    if (!wrap.classList.contains("is-rotated")) setLandscapeLabel(btn, "横屏");
+  });
 }
 function enterRotated(wrap, btn) {
   wrap.classList.add("is-rotated");
@@ -783,8 +895,8 @@ async function renderPlayer(params) {
   fitSelect.addEventListener("change", () => { video.style.objectFit = fitSelect.value; savePrefs({ fit: fitSelect.value }); });
 
   const reload = button("重新解析", { variant: "text", icon: "refresh", onclick: () => renderPlayer(params) });
-  const back10Btn = button("快退 10 秒", { variant: "text", onclick: () => { video.currentTime = Math.max(0, video.currentTime - 10); showSeekFlash(playerWrap, "快退 10 秒"); } });
-  const fwd10Btn = button("快进 10 秒", { variant: "text", onclick: () => { video.currentTime = video.currentTime + 10; showSeekFlash(playerWrap, "快进 10 秒"); } });
+  const back10Btn = button("快退 10 秒", { variant: "text", onclick: () => seekBy(video, playerWrap, -10) });
+  const fwd10Btn = button("快进 10 秒", { variant: "text", onclick: () => seekBy(video, playerWrap, 10) });
   const landscapeBtn = button("横屏", { variant: "text", onclick: () => toggleLandscape(video, playerWrap, landscapeBtn) });
   const controls = el("div", { class: "player-controls" }, prevBtn, nextBtn, rateSelect, fitSelect, reload, back10Btn, fwd10Btn, landscapeBtn);
   if (pipSupported(video)) {
@@ -792,7 +904,8 @@ async function renderPlayer(params) {
   }
   main.append(controls);
   bindPlayerKeys(video);
-  bindDoubleTapSeek(video, playerWrap);
+  bindTapSeek(video, playerWrap);
+  bindNativeFullscreenGuard(video, playerWrap, landscapeBtn);
 
   // 选集（roads + 上次观看）只拉一次：上一集/下一集 和 选集面板共用
   const playCtx = { plugin, src, title: seriesTitle, bid };

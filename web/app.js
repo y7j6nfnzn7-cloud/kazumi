@@ -654,8 +654,11 @@ function updateInfoFor(item) {
 function updateLineFor(item, short) {
   const u = updateInfoFor(item);
   if (!u) return "";
-  // 总集数未知、且开播已超过 26 周：无法判断是否还在更新，不显示、不编日期
-  if (!u.total && (Date.now() - u.airDate.getTime()) > 26 * 7 * 86400000) return "";
+  // 总集数未知、且开播已超过 26 周：无法判断是否还在更新，不推测更新日，
+  // 但不空白——显示开播年月（用户 2026-11-07 定：分类页卡片也要有更新行）。
+  if (!u.total && (Date.now() - u.airDate.getTime()) > 26 * 7 * 86400000) {
+    return u.airDate.getFullYear() + "年" + (u.airDate.getMonth() + 1) + "月";
+  }
   const dateStr = (u.next.getMonth() + 1) + "月" + u.next.getDate() + "日";
   const wdStr = "周" + WEEKDAY_CN[u.weekday];
   let head;
@@ -797,17 +800,68 @@ function keepForRegion(item, key) {
 }
 
 // 主页分区（最近热播 / 新发）：只在“全部”未过滤时显示，数据来自默认热门流前两页。
-// 最近热播定义：近 90 天内开播，按评分数（votes）倒序；新发定义：按开播日倒序。
+// 最近热播定义：近 90 天内开播，按 Bangumi 排名（rank）升序；新发定义：按开播日倒序。
 // 开播日取 updateInfoFor(item).airDate（airDate 字段或 info 文本里的“×年×月×日”）。
 // 拉取失败或数据不足时整个分区隐藏，不显示空白和报错。
 const HOME_SECTIONS = { items: null, loading: false, epoch: 0 };
 
+// 热门排序（用户 2026-11-07 定：按真正热门排，不要只按评分数）：
+// rank 是 Bangumi 自身的热门度量（已综合评分与评分数），数字越小越热门；
+// 无 rank 的按评分数倒序垫底。
+function compareHot(a, b) {
+  const ra = (a && a.rank) || 0, rb = (b && b.rank) || 0;
+  if (ra > 0 && rb > 0) return ra - rb;
+  if (ra > 0) return -1;
+  if (rb > 0) return 1;
+  return ((b && b.votes) || 0) - ((a && a.votes) || 0);
+}
+
+// 详情回填：分类页卡片没有 info（无总集数/开播日）时，调 /api/bangumi/{id}
+// 拿开播日和总集数再算更新行；全局生效（所有用 buildPosterCard 的卡片）。
+// 带内存缓存（同一 id 只拉一次）+ 并发上限 6，避免 40 张卡同时发请求。
+const BANGUMI_DETAIL_CACHE = new Map();
+const BANGUMI_DETAIL_QUEUE = [];
+let BANGUMI_DETAIL_RUNNING = 0;
+function queueBangumiDetail(id) {
+  if (BANGUMI_DETAIL_CACHE.has(id)) return BANGUMI_DETAIL_CACHE.get(id);
+  const p = new Promise((resolve) => { BANGUMI_DETAIL_QUEUE.push({ id, resolve }); pumpBangumiDetail(); });
+  BANGUMI_DETAIL_CACHE.set(id, p);
+  return p;
+}
+function pumpBangumiDetail() {
+  while (BANGUMI_DETAIL_RUNNING < 6 && BANGUMI_DETAIL_QUEUE.length) {
+    const job = BANGUMI_DETAIL_QUEUE.shift();
+    BANGUMI_DETAIL_RUNNING++;
+    fetchJson("/api/bangumi/" + encodeURIComponent(job.id))
+      .then((d) => job.resolve(d)).catch(() => job.resolve(null))
+      .finally(() => { BANGUMI_DETAIL_RUNNING--; pumpBangumiDetail(); });
+  }
+}
+function backfillSubLine(card, item, compact) {
+  if (!item || item.id == null) return;
+  queueBangumiDetail(String(item.id)).then((d) => {
+    if (!card.isConnected) return;
+    let line = "";
+    if (d) {
+      const merged = Object.assign({}, item, { airDate: d.airDate || item.airDate, info: d.info || item.info });
+      line = updateLineFor(merged, compact);
+    }
+    // 详情里也拿不到开播日：不空白，显示“暂无更新信息”（不编日期）。
+    if (!line) line = "暂无更新信息";
+    let n = card.querySelector(".sub");
+    if (!n) { n = el("div", { class: "sub" }, line); card.append(n); }
+    else n.textContent = line;
+  });
+}
+
 function buildPosterCard(item, compact) {
   const sub = updateLineFor(item, compact);
-  return el("div", { class: "poster-card sl" + (compact ? " compact" : ""), onclick: () => go("/bangumi", { id: String(item.id) }) },
+  const card = el("div", { class: "poster-card sl" + (compact ? " compact" : ""), onclick: () => go("/bangumi", { id: String(item.id) }) },
     coverImg(cardImage(item.images)),
     el("div", { class: "name" }, item.nameCn || item.name || ""),
     sub ? el("div", { class: "sub" }, sub) : null);
+  if (!sub) backfillSubLine(card, item, compact);
+  return card;
 }
 
 // 主页分区渲染：items 为空时整个分区不渲染（不留空白分区、不显示 null）
@@ -857,12 +911,13 @@ async function loadHomeSections(host) {
 function renderHomeSectionsFrom(items, host) {
   const now = Date.now();
   const withDate = items.map((it) => ({ it, u: updateInfoFor(it) })).filter((x) => x.u);
-  // 最近热播：近 90 天内开播，按评分数倒序，取 12
+  // 最近热播：近 90 天内开播，按 Bangumi 排名（rank，数字越小越热门）升序，取 12；
+  // rank 是 Bangumi 自身的热门度量（已综合评分与评分数），比只按评分数更能代表“热门”。
   const hot = withDate.filter((x) => now - x.u.airDate.getTime() <= 90 * 86400000)
-    .sort((a, b) => (b.it.votes || 0) - (a.it.votes || 0)).slice(0, 12).map((x) => x.it);
+    .sort((a, b) => compareHot(a.it, b.it)).slice(0, 12).map((x) => x.it);
   // 新发：按开播日倒序，取 12
   const fresh = withDate.slice().sort((a, b) => b.u.airDate - a.u.airDate).slice(0, 12).map((x) => x.it);
-  renderHomeSection(host, "hot", "最近热播", "近 90 天开播，按评分数排序", hot);
+  renderHomeSection(host, "hot", "最近热播", "近 90 天开播，按 Bangumi 排名排序", hot);
   renderHomeSection(host, "new", "新发", "按开播日期倒序", fresh);
 }
 
@@ -978,6 +1033,8 @@ async function renderTabPopular(container, initialRegion) {
           seen.add(it.id);
           if (keepForRegion(it, region.key)) merged.push(it);
         }
+        // 地区分类不随机取样：合并后按热度（Bangumi 排名升序，无 rank 的按评分数垫底）排完再渲染
+        merged.sort(compareHot);
         POPULAR_STATE.items = merged;
         POPULAR_STATE.exhausted = true;
       } else {

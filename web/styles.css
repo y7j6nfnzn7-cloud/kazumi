@@ -1013,11 +1013,16 @@ select.btn {
 /* ============================================================
  * 播放器
  * ============================================================ */
-.player-wrap { position: relative; border-radius: 16px; overflow: hidden; background: #000; margin-top: 4px; }
-.player-wrap video { width: 100%; max-height: 78vh; display: block; background: #000; }
+.player-wrap { position: relative; border-radius: 16px; overflow: hidden; background: #000; margin-top: 4px; touch-action: manipulation; }
+.player-wrap video { width: 100%; max-height: 78vh; display: block; background: #000; touch-action: manipulation; }
 /* 一键横屏（iOS Safari 无 orientation lock 时的 CSS 旋转全屏）：播放器旋转 90° 铺满屏幕 */
+/* 真机问题（2026-11-07）：iOS 原生全屏会丢掉 HTML 叠加层、弹 iOS 自带控制层，JS 关不掉，*/
+/* 所以横屏一律走 CSS 旋转（见 player.js toggleLandscape），不用原生全屏。*/
 body.no-scroll { overflow: hidden; }
-.player-wrap.is-rotated { position: fixed; left: 50%; top: 50%; width: 100vh; height: 100vw; max-height: none; transform: translate(-50%, -50%) rotate(90deg); z-index: 1000; border-radius: 0; margin: 0; }
+.player-wrap.is-rotated { position: fixed; left: 50%; top: 50%; width: 100vh; width: 100dvh; height: 100vw; height: 100dvw; max-height: none; transform: translate(-50%, -50%) rotate(90deg); z-index: 9999; border-radius: 0; margin: 0; }
+/* 点按层：盖在视频上方（底部留 52px 给原生控制条 scrub 用），点按不碰 video 元素本身，*/
+/* 原生控制层不会弹出来；单击/双击分开判断（见 player.js bindTapSeek）。 */
+.player-wrap .tap-zone { position: absolute; left: 0; right: 0; top: 0; bottom: 52px; z-index: 3; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .player-wrap.is-rotated video { width: 100%; height: 100%; max-height: none; }
 .player-wrap .rotate-exit { display: none; position: absolute; top: 12px; right: 12px; z-index: 7; padding: 8px 14px; border-radius: 20px; border: none; background: rgba(0,0,0,0.6); color: #fff; font-size: 14px; cursor: pointer; }
 .player-wrap.is-rotated .rotate-exit { display: block; }
