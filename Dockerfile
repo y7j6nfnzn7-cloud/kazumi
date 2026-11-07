@@ -30,6 +30,13 @@ RUN curl -L -o /tmp/kazumiweb.tar.gz \
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
+# 本地补丁：覆盖上游 web/ 里的 player.js / styles.css，并加双语字幕文件。
+# 上游 tarball 里没有这些改动（横屏按钮、双击快进、双语字幕叠加层），
+# 不覆盖的话部署出来还是旧版。subs/ 里是第 1 集的中日双语 VTT。
+COPY web/player.js /app/web/player.js
+COPY web/styles.css /app/web/styles.css
+COPY web/subs /app/web/subs
+
 # 自改前端（2026-11-07）：web/ 里是改过的 app.js / player.js / styles.css / index.html，
 # 覆盖上游 v0.2.0 包里的同名文件：一键横屏、双击快进、首页更新日期、国产分类、封面提速。
 # 上游 tarball 不变，只换前端静态文件；后端二进制和启动命令都不动。

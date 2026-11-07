@@ -1537,8 +1537,8 @@ async function renderSearch(params) {
     const summary = filterSummary(f);
     bodyNode.append(
       el("div", { class: "results-head" }, el("div", { class: "results-title" }, "搜索结果"), el("div", { class: "ctrls" }, sortBtn, filterBtn)),
-      el("div", { class: "results-sub" }, S.loading && !S.items.length ? "正在搜索…" : shown.length + " 部番剧" + (hidden > 0 ? " · 隐藏 " + hidden + " 部" : "")),
-      summary ? el("div", { class: "results-summary" }, summary) : null);
+      el("div", { class: "results-sub" }, S.loading && !S.items.length ? "正在搜索…" : shown.length + " 部番剧" + (hidden > 0 ? " · 隐藏 " + hidden + " 部" : "")));
+    if (summary) bodyNode.append(el("div", { class: "results-summary" }, summary));
     if (S.loading && !S.items.length) { bodyNode.append(loadingNode("正在搜索番剧", "medium")); return; }
     if (S.error && !S.items.length) {
       bodyNode.append(errorState({ title: "搜索失败", message: S.error, onRetry: () => loadPage(true) }));

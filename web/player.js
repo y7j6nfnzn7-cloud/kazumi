@@ -214,8 +214,11 @@ function disposeDanmaku() {
 // ====== 双语字幕（中日 / 中英，按作品原语言定） ======
 // 规则（用户 2026-11-06 定）：日番原语言日语 → 中日双语；美剧/英文原语言英语 → 中英双语；
 // 国漫原语言中文 → 中英双语。本集是日番，只做中日双语。
-// 字幕来源：字幕文件来自 [NEST] 第 1 集内封字幕（HIDIVE WEB-DL 1080p，简繁中文 + 日文内封），
-// 用 ffmpeg 从 mkv 的字幕轨抽出，转 WebVTT；不是机器翻译、不是现编的台词。
+// 字幕来源（诚实标注，勿改）：本集没能拿到人工字幕。NEST 内封 mkv 的 BT 在本机走不通，
+// Jimaku.cc 要注册 API key（需浏览器办）。现用文件全部由本集 AGE 视频本身机器生成：
+//  - 日文：faster-whisper small 对 AGE 视频音轨做语音识别（ASR），可能听错个别词；
+//  - 中文：RapidOCR 识别 AGE 视频画面上烧入的中文字幕（硬字幕），可能认错个别字。
+// 不是人工字幕组字幕、不是机器翻译、不是现编的台词；拿到人工字幕后应替换这两个文件。
 // 注意：AGE 视频本身已烧入中文字幕（硬字幕），所以叠加层只显示日文那一行，
 // 画面上同时看到日文（叠加）+ 中文（硬字幕）= 中日双语；再叠一层中文会和硬字幕重影。
 // 仅中文档 = 关掉叠加层，只看画面自带硬字幕。英文字幕：本集暂无英文字幕文件，不提供中英档。
@@ -226,7 +229,7 @@ const DUAL_SUB_REGISTRY = {
       ja: "/assets/subs/dark-summoner-ep01.ja.vtt",
       zh: "/assets/subs/dark-summoner-ep01.zh.vtt",
       hardsubZh: true,
-      note: "字幕来自 [NEST] 第 1 集内封（简繁中文 + 日文），ffmpeg 抽轨转 VTT",
+      note: "日文=Whisper 语音识别（机器生成），中文=画面硬字幕 OCR（机器生成）；人工字幕待替换",
     },
   },
 };
@@ -753,7 +756,7 @@ async function renderPlayer(params) {
     // 字幕加载失败时在播放页 meta 区提示，不静默
     setTimeout(() => {
       if (dualSub.loadError) showError("双语字幕加载失败：" + dualSub.loadError + "（视频本身的中文字幕仍可正常看）");
-      else if (dualSub.loaded) toast("中日双语字幕已加载：日文 " + dualSub.jaCues.length + " 条 / 中文 " + dualSub.zhCues.length + " 条");
+      else if (dualSub.loaded) toast("中日双语字幕已加载：日文 " + dualSub.jaCues.length + " 条（语音识别） / 中文 " + dualSub.zhCues.length + " 条（画面识别），机器生成仅供参考");
     }, 1500);
   }
 
