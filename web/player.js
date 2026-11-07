@@ -211,28 +211,45 @@ function disposeDanmaku() {
   }
 }
 
-// ====== 双语字幕（中日 / 中英，按作品原语言定） ======
-// 规则（用户 2026-11-06 定）：日番原语言日语 → 中日双语；美剧/英文原语言英语 → 中英双语；
-// 国漫原语言中文 → 中英双语。本集是日番，只做中日双语。
-// 字幕来源（诚实标注，勿改）：本集没能拿到人工字幕。NEST 内封 mkv 的 BT 在本机走不通，
-// Jimaku.cc 要注册 API key（需浏览器办）。现用文件全部由本集 AGE 视频本身机器生成：
-//  - 日文：faster-whisper small 对 AGE 视频音轨做语音识别（ASR），可能听错个别词；
-//  - 中文：RapidOCR 识别 AGE 视频画面上烧入的中文字幕（硬字幕），可能认错个别字。
-// 不是人工字幕组字幕、不是机器翻译、不是现编的台词；拿到人工字幕后应替换这两个文件。
-// 注意：AGE 视频本身已烧入中文字幕（硬字幕），所以叠加层只显示日文那一行，
-// 画面上同时看到日文（叠加）+ 中文（硬字幕）= 中日双语；再叠一层中文会和硬字幕重影。
-// 仅中文档 = 关掉叠加层，只看画面自带硬字幕。英文字幕：本集暂无英文字幕文件，不提供中英档。
-const DUAL_SUB_REGISTRY = {
-  // bangumiId: { episode: { ja, zh, hardsubZh, note } }
-  "630160": { // 黑暗召唤师在地下恋爱中（2026-10-04 放送，日番）
-    1: {
-      ja: "/assets/dark-summoner-ep01.ja.vtt",
-      zh: "/assets/dark-summoner-ep01.zh.vtt",
-      hardsubZh: true,
-      note: "日文=Whisper 语音识别（机器生成），中文=画面硬字幕 OCR（机器生成）；人工字幕待替换",
-    },
-  },
-};
+// ====== 双语字幕（按作品原语言配对） ======
+// 通用自动探测（用户 2026-11-07 定：不要一个剧一个剧手工配，软件通用适配）：
+// 播放任意番任意一集时，先按番剧原语言定配对，再按命名规则自动找字幕文件，不用改代码、不用登记：
+//   日语番：web/<bangumiId>-ep<NN>.ja.vtt + .zh.vtt → 中日双语（日文叠加 + 画面中文字幕）
+//   英语番：web/<bangumiId>-ep<NN>.en.vtt + .zh.vtt → 中英双语（英文叠加 + 画面中文字幕）
+//   国漫（中文原语言）：同英语番，叠加 .en.vtt → 中英双语（英文由机器翻译生成，待做）
+// 原语言从 Bangumi 番剧信息的 tags（产地标签：日本 / 美国 / 欧美 / 中国 / 国产…）判断，不写死；
+// 拿不到 tags 时默认按日语番处理（本站绝大多数是日番）。
+// 文件一律扁平名、放 web/ 根目录，经 /assets/ 直连；服务端静态路由不提供子目录文件，子目录会 404。
+// 例如黑暗召唤师（bangumiId 630160）第 1 集：630160-ep01.ja.vtt / 630160-ep01.zh.vtt；
+// 瑞克和莫蒂第一季（bangumiId 93377）第 1 集：93377-ep01.en.vtt / 93377-ep01.zh.vtt。
+// 叠加语言文件存在（200）就自动启用双语模式；不存在就正常只放原视频，不报错、不弹红字。
+// 字幕来源（诚实标注，勿改）：目前没有人工字幕。NEST 内封 mkv 的 BT 在本机走不通，
+// Jimaku.cc 要注册 API key（需浏览器办）。现用文件全部由对应集的 AGE 视频本身机器生成：
+//  - 叠加语言（日/英）：faster-whisper small 对 AGE 视频音轨做语音识别（ASR），可能听错个别词；
+//  - 中文：RapidOCR 识别 AGE 视频画面上烧入的中文字幕（硬字幕），可能认错个别字；
+//    无硬字幕的英语番，中文用机器翻译生成（文件头注明是机器翻译）。
+// 不是人工字幕组字幕、不是现编的台词；拿到人工字幕后应替换对应文件。
+// 注意：AGE 视频本身已烧入中文字幕（硬字幕），所以叠加层只显示叠加语言那一行，
+// 画面上同时看到叠加语言 + 中文（硬字幕）= 双语；再叠一层中文会和硬字幕重影。
+// 仅中文档 = 关掉叠加层，只看画面自带硬字幕。
+function detectOverlayLang(tags) {
+  const names = (tags || []).map((t) => (typeof t === "string" ? t : t && t.name) || "");
+  const has = (...ws) => ws.some((w) => names.includes(w));
+  // 英语番与国漫都叠英文：英语番是中英双语，国漫按原规则也是中英双语（英文机器翻译）。
+  if (has("美国", "欧美", "英国", "法国", "加拿大", "澳大利亚", "德国",
+          "中国", "国产", "大陆", "香港", "台湾")) return "en";
+  return "ja";
+}
+function dualSubPaths(bid, episode, ovlLang) {
+  const ep = String(parseInt(episode || "1", 10) || 1).padStart(2, "0");
+  const id = String(bid || "");
+  if (!id) return null;
+  return {
+    ovl: "/assets/" + id + "-ep" + ep + "." + ovlLang + ".vtt",
+    zh: "/assets/" + id + "-ep" + ep + ".zh.vtt",
+    hardsubZh: true,
+  };
+}
 function parseVtt(text) {
   const cues = [];
   const blocks = String(text || "").replace(/\r\n/g, "\n").split(/\n\s*\n/);
@@ -267,37 +284,66 @@ function cueAt(cues, t) {
 class DualSubLayer {
   constructor(video, container, opts) {
     this.video = video;
-    this.entry = (DUAL_SUB_REGISTRY[String(opts.bid || "")] || {})[opts.episode] || null;
+    this.bid = String(opts.bid || "");
+    this.episode = opts.episode;
+    this.entry = null; // 探测到叠加语言文件后才有值
+    this.ovlLang = "ja"; // 默认日语番；load() 里按 tags 修正
+    this.dualMode = "ja-zh";
+    this.dualLabel = "中日双语";
+    this.done = false; this.onReady = null;
     this.mode = "ja-zh";
     try { this.mode = localStorage.getItem("dualSubMode") || "ja-zh"; } catch (_) {}
-    if (!["ja-zh", "zh", "off"].includes(this.mode)) this.mode = "ja-zh";
-    this.jaCues = []; this.zhCues = []; this.loaded = false; this.loadError = "";
+    if (!["ja-zh", "en-zh", "zh", "off"].includes(this.mode)) this.mode = "ja-zh";
+    this.ovlCues = []; this.zhCues = []; this.loaded = false; this.loadError = "";
     this.node = document.createElement("div");
     this.node.className = "dual-sub";
-    this.jaNode = document.createElement("div");
-    this.jaNode.className = "dual-sub-ja";
+    this.ovlNode = document.createElement("div");
+    this.ovlNode.className = "dual-sub-ja"; // 复用现有叠加层样式（棕色 pill），与语言无关
     this.zhNode = document.createElement("div");
     this.zhNode.className = "dual-sub-zh";
-    this.node.append(this.jaNode, this.zhNode);
+    this.node.append(this.ovlNode, this.zhNode);
     container.append(this.node);
     this._onTime = () => this.render();
     video.addEventListener("timeupdate", this._onTime);
     video.addEventListener("seeked", this._onTime);
-    if (this.entry) this.load();
-    else this.render();
+    if (this.bid) this.load();
+    else { this.done = true; this.render(); }
   }
   async load() {
+    // 1) 按番剧 tags 定原语言配对（拿不到就默认日语番）。
     try {
-      const [ja, zh] = await Promise.all([
-        fetch(this.entry.ja).then((r) => { if (!r.ok) throw new Error("日文字幕 " + r.status); return r.text(); }),
-        fetch(this.entry.zh).then((r) => { if (!r.ok) throw new Error("中文字幕 " + r.status); return r.text(); }),
-      ]);
-      this.jaCues = parseVtt(ja);
-      this.zhCues = parseVtt(zh);
-      this.loaded = this.jaCues.length > 0 && this.zhCues.length > 0;
-      if (!this.loaded) this.loadError = "字幕文件为空（日 " + this.jaCues.length + " 条 / 中 " + this.zhCues.length + " 条）";
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, 3000);
+      const res = await fetch("/api/bangumi/" + encodeURIComponent(this.bid), { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const info = await res.json();
+        this.ovlLang = detectOverlayLang(info && info.tags);
+      }
+    } catch (e) { /* 默认 ja */ }
+    this.dualMode = this.ovlLang + "-zh";
+    this.dualLabel = this.ovlLang === "en" ? "中英双语" : "中日双语";
+    // 存过的双语档跟着当前番的语言走（ja-zh/en-zh 互换）；仅中文/关原样保留。
+    if (this.mode === "ja-zh" || this.mode === "en-zh") this.mode = this.dualMode;
+    this.entry = dualSubPaths(this.bid, this.episode, this.ovlLang);
+    // 2) 探测叠加语言文件：不存在（404）= 本集没有双语字幕，静默无字幕播放，
+    // 不设 loadError、不弹红字。文件存在但解析为空才算加载失败。
+    let ovlText = null;
+    try {
+      const r = await fetch(this.entry.ovl);
+      if (!r.ok) { this.entry = null; this.done = true; this.render(); if (typeof this.onReady === "function") this.onReady(); return; }
+      ovlText = await r.text();
+    } catch (e) { this.entry = null; this.done = true; this.render(); if (typeof this.onReady === "function") this.onReady(); return; }
+    try {
+      const zhText = await fetch(this.entry.zh).then((r) => r.ok ? r.text() : "").catch(() => "");
+      this.ovlCues = parseVtt(ovlText);
+      this.zhCues = zhText ? parseVtt(zhText) : [];
+      this.loaded = this.ovlCues.length > 0;
+      if (!this.loaded) this.loadError = "字幕文件为空（" + this.dualLabel + "叠加 " + this.ovlCues.length + " 条）";
     } catch (e) { this.loadError = String(e && e.message || e); }
+    this.done = true;
     this.render();
+    if (typeof this.onReady === "function") this.onReady();
   }
   setMode(mode) {
     this.mode = mode;
@@ -306,15 +352,15 @@ class DualSubLayer {
   }
   render() {
     const t = this.video ? this.video.currentTime || 0 : 0;
-    if (!this.entry || this.mode === "off" || this.mode === "zh") {
+    if (!this.entry || !this.loaded || this.mode !== this.dualMode) {
       this.node.style.display = "none";
-      this.jaNode.textContent = ""; this.zhNode.textContent = "";
+      this.ovlNode.textContent = ""; this.zhNode.textContent = "";
       return;
     }
-    // ja-zh 档：只叠日文行；中文看画面硬字幕（hardsubZh），避免重影。
-    const ja = cueAt(this.jaCues, t);
-    this.node.style.display = ja ? "" : "none";
-    this.jaNode.textContent = ja ? ja.text : "";
+    // 双语档：只叠加一层原语言行；中文看画面硬字幕（hardsubZh），避免重影。
+    const ovl = cueAt(this.ovlCues, t);
+    this.node.style.display = ovl ? "" : "none";
+    this.ovlNode.textContent = ovl ? ovl.text : "";
     this.zhNode.textContent = "";
     this.zhNode.style.display = "none";
   }
@@ -732,33 +778,41 @@ async function renderPlayer(params) {
   const danmaku = new DanmakuLayer(video, playerWrap);
   activeDanmaku = danmaku;
 
-  // ====== 双语字幕：中日双语 / 仅中文 / 关（三档可切，记在 localStorage） ======
-  // 本集是日番，按原语言规则只做中日双语；中英档本集暂无英文字幕文件，不显示。
+  // ====== 双语字幕：按原语言配对（中日双语 / 中英双语 / 仅中文 / 关，记在 localStorage） ======
   const dualSub = new DualSubLayer(video, playerWrap, { bid, episode: epNum });
   activeDualSub = dualSub;
-  if (dualSub.entry) {
-    const subSelect = el("select", { class: "btn btn-tonal", "aria-label": "字幕" });
-    for (const o of [
-      { v: "ja-zh", label: "字幕 中日双语" },
-      { v: "zh", label: "字幕 仅中文" },
-      { v: "off", label: "字幕 关" },
-    ]) {
-      const opt = el("option", { value: o.v }, o.label);
-      if (o.v === dualSub.mode) opt.setAttribute("selected", "");
-      subSelect.append(opt);
+  // 通用探测：字幕档下拉默认隐藏，探测到叠加语言文件加载成功后才出现；
+  // 本集无字幕文件时不显示、不报错、不弹红字。双语档的文案（中日/中英）随番的原语言定。
+  const subSelect = el("select", { class: "btn btn-tonal", "aria-label": "字幕" });
+  subSelect.style.display = "none";
+  const dualOpt = el("option", { value: dualSub.dualMode }, "字幕 " + dualSub.dualLabel);
+  const zhOpt = el("option", { value: "zh" }, "字幕 仅中文");
+  const offOpt = el("option", { value: "off" }, "字幕 关");
+  subSelect.append(dualOpt, zhOpt, offOpt);
+  subSelect.addEventListener("change", () => {
+    dualSub.setMode(subSelect.value);
+    toast(subSelect.value === dualSub.dualMode ? "已切换" + dualSub.dualLabel + "字幕（" + (dualSub.ovlLang === "en" ? "英文" : "日文") + "叠加 + 画面中文字幕）"
+      : subSelect.value === "zh" ? "仅中文：只看画面自带中文字幕" : "字幕已关");
+  });
+  controls.append(subSelect);
+  let subUIHandled = false;
+  const showSubUI = () => {
+    if (subUIHandled || !dualSub.done) return;
+    subUIHandled = true;
+    // 字幕文件存在但加载失败时在播放页 meta 区提示，不静默
+    if (dualSub.loadError) showError("双语字幕加载失败：" + dualSub.loadError + "（视频本身的中文字幕仍可正常看）");
+    else if (dualSub.loaded) {
+      dualOpt.value = dualSub.dualMode;
+      dualOpt.textContent = "字幕 " + dualSub.dualLabel;
+      subSelect.value = dualSub.mode;
+      subSelect.style.display = "";
+      toast(dualSub.dualLabel + "字幕已加载：" + (dualSub.ovlLang === "en" ? "英文 " : "日文 ") + dualSub.ovlCues.length + " 条（语音识别） / 中文 " + dualSub.zhCues.length + " 条（画面识别），机器生成仅供参考");
     }
-    subSelect.addEventListener("change", () => {
-      dualSub.setMode(subSelect.value);
-      toast(subSelect.value === "ja-zh" ? "已切换中日双语字幕（日文叠加 + 画面中文字幕）"
-        : subSelect.value === "zh" ? "仅中文：只看画面自带中文字幕" : "字幕已关");
-    });
-    controls.append(subSelect);
-    // 字幕加载失败时在播放页 meta 区提示，不静默
-    setTimeout(() => {
-      if (dualSub.loadError) showError("双语字幕加载失败：" + dualSub.loadError + "（视频本身的中文字幕仍可正常看）");
-      else if (dualSub.loaded) toast("中日双语字幕已加载：日文 " + dualSub.jaCues.length + " 条（语音识别） / 中文 " + dualSub.zhCues.length + " 条（画面识别），机器生成仅供参考");
-    }, 1500);
-  }
+    // 无字幕文件（entry 为空、无 loadError）：保持隐藏，不提示。
+  };
+  dualSub.onReady = showSubUI;
+  if (dualSub.done) showSubUI();
+  setTimeout(showSubUI, 2500);
 
   const sourceTile = tile({ icon: "unfold_more", title: "弹幕源", desc: "自动匹配", chevron: true, onclick: () => {
     openDanmakuSourceSheet({ keyword: seriesTitle, onPick: async (pick) => {
