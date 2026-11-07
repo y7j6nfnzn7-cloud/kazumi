@@ -246,8 +246,11 @@ function dualSubPaths(bid, episode, ovlLang) {
   if (!id) return null;
   return {
     // 主：字幕插件端点（只读缓存；缓存没有就 404，不生成、不等待）。
-    ovl: "/api/subs/" + id + "/ep" + ep + "?lang=" + ovlLang,
-    zh: "/api/subs/" + id + "/ep" + ep + "?lang=zh",
+    // v 参数：字幕缓存版本号。服务端曾给字幕加 24 小时缓存，旧字幕会被
+    // 浏览器/边缘节点缓存住；改这个数字换个地址，立即绕开旧缓存。
+    // 服务端已把 Cache-Control 改成 no-cache，以后更新字幕不用再改这里。
+    ovl: "/api/subs/" + id + "/ep" + ep + "?lang=" + ovlLang + "&v=2",
+    zh: "/api/subs/" + id + "/ep" + ep + "?lang=zh&v=2",
     // 备：主站静态种子文件（插件端点挂了也能播双语）。
     ovlStatic: "/assets/" + id + "-ep" + ep + "." + ovlLang + ".vtt",
     zhStatic: "/assets/" + id + "-ep" + ep + ".zh.vtt",
