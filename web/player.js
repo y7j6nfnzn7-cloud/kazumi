@@ -226,8 +226,8 @@ const DUAL_SUB_REGISTRY = {
   // bangumiId: { episode: { ja, zh, hardsubZh, note } }
   "630160": { // 黑暗召唤师在地下恋爱中（2026-10-04 放送，日番）
     1: {
-      ja: "/assets/subs/dark-summoner-ep01.ja.vtt",
-      zh: "/assets/subs/dark-summoner-ep01.zh.vtt",
+      ja: "/assets/dark-summoner-ep01.ja.vtt",
+      zh: "/assets/dark-summoner-ep01.zh.vtt",
       hardsubZh: true,
       note: "日文=Whisper 语音识别（机器生成），中文=画面硬字幕 OCR（机器生成）；人工字幕待替换",
     },
