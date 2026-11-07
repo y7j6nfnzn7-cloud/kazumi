@@ -628,7 +628,8 @@ function updateInfoFor(item) {
   return { total, airDate: first, weekday: wd, next, isToday: delta === 0, aired, finished };
 }
 // 例："11月8日 周日更新 · 共12集 · 已播约5集" / "已完结 · 共12集" / "11月8日 周日开播"
-function updateLineFor(item) {
+// short=true 时只返回前半句（日期+星期+状态），横滑小卡片用，保证一行内完整显示、不被省略号截断
+function updateLineFor(item, short) {
   const u = updateInfoFor(item);
   if (!u) return "";
   // 总集数未知、且开播已超过 26 周：无法判断是否还在更新，不显示、不编日期
@@ -640,6 +641,7 @@ function updateLineFor(item) {
   else if (u.aired === 0) head = dateStr + " " + wdStr + "开播";
   else if (u.isToday) head = "今天" + wdStr + "更新";
   else head = dateStr + " " + wdStr + "更新";
+  if (short) return head;
   const tail = [];
   if (u.total) tail.push("共" + u.total + "集");
   // 总集数未知时不推测已播集数（否则老番会算出几百集）；有总集数才显示
@@ -717,29 +719,143 @@ async function renderHome(params) {
   if (tab === "timeline") renderTabTimeline($app);
   else if (tab === "collect") renderTabCollect($app);
   else if (tab === "my") renderTabMy($app);
-  else renderTabPopular($app);
+  else renderTabPopular($app, params.region);
 }
 
 // ============================================================
 // 推荐（popular_page.dart）
 // ============================================================
 const POPULAR_TAGS = ["国产", "日常", "原创", "校园", "搞笑", "奇幻", "百合", "恋爱", "悬疑", "热血", "后宫", "机战"];
-const POPULAR_STATE = { tag: "", items: [], loading: false, exhausted: false, epoch: 0 };
+const POPULAR_STATE = { tag: "", region: "", items: [], loading: false, exhausted: false, epoch: 0 };
 
-function buildPosterCard(item) {
-  const sub = updateLineFor(item);
-  return el("div", { class: "poster-card sl", onclick: () => go("/bangumi", { id: String(item.id) }) },
+// ====== 地区分类（全局通用：任何番都按标签判断，不写死片名） ======
+// 信号来源：Bangumi 用户标签（item.tags，按使用人数倒序返回）。
+//   /api/popular?tag=…、/api/bangumi/{id}、/api/search 都返回 tags；
+//   /api/popular（无 tag）和 /api/timeline 的 tags 为空，所以地区列表一律走 tag 搜索接口取数，
+//   再用下面的主导标签过滤一次。
+// 一个番可能同时带多个地区标签（实测：成龙历险记同时带“国产”和“欧美”）：
+// 取顺序上第一个出现的地区标签为准，即使用人数最多的那个，就是它的主导地区。
+// 实测（2026-11-07，线上接口）：tag=日本 20 条全留；tag=国产 20 条留 16 条
+// （4 条成龙历险记主导标签是欧美，被滤掉）；tag=中国 20 条全留；tag=欧美 20 条留 18 条。
+const REGION_TAGS = {
+  jp: ["日本", "日本动画", "日语"],
+  cn: ["国产", "中国", "中国动画", "国创", "华语"],
+  us: ["欧美", "美国", "美漫", "欧美动画", "美国动画", "西方剧集"],
+};
+const REGION_TAG_TO_KEY = {};
+for (const [key, tags] of Object.entries(REGION_TAGS))
+  for (const t of tags) REGION_TAG_TO_KEY[t] = key;
+// 地区列表：全部走默认热门流（可翻页）；日漫/国漫/美漫走 tag 搜索（一次返回，
+// 国漫取“国产”+“中国”两路并集去重，再用主导标签过滤）。
+const REGIONS = [
+  { key: "",   label: "全部", tags: null },
+  { key: "jp", label: "日漫", tags: ["日本"] },
+  { key: "cn", label: "国漫", tags: ["国产", "中国"] },
+  { key: "us", label: "美漫", tags: ["欧美"] },
+];
+// “其他”没有可靠信号：没有一个 Bangumi 标签能稳定代表“其他地区”，
+// 用默认热门流里“无地区标签”的番冒充“其他”会把大量日漫错放进去，所以不设“其他”入口。
+function regionLabel(key) {
+  const r = REGIONS.find((x) => x.key === key);
+  return r ? r.label : "";
+}
+function regionOf(item) {
+  const tags = (item.tags || []).map((t) => (t.name || "").trim()).filter(Boolean);
+  for (const t of tags) {
+    const r = REGION_TAG_TO_KEY[t];
+    if (r) return r;
+  }
+  return ""; // 无地区信号：不编造、不归类
+}
+// 地区列表过滤：主导地区是目标地区的留；无地区信号的留（信任 tag 搜索本身）；
+// 主导地区是其他地区的滤掉（如国产搜索里混进来的成龙历险记）。
+function keepForRegion(item, key) {
+  const r = regionOf(item);
+  return r === "" || r === key;
+}
+
+// 主页分区（最近热播 / 新发）：只在“全部”未过滤时显示，数据来自默认热门流前两页。
+// 最近热播定义：近 90 天内开播，按评分数（votes）倒序；新发定义：按开播日倒序。
+// 开播日取 updateInfoFor(item).airDate（airDate 字段或 info 文本里的“×年×月×日”）。
+// 拉取失败或数据不足时整个分区隐藏，不显示空白和报错。
+const HOME_SECTIONS = { items: null, loading: false, epoch: 0 };
+
+function buildPosterCard(item, compact) {
+  const sub = updateLineFor(item, compact);
+  return el("div", { class: "poster-card sl" + (compact ? " compact" : ""), onclick: () => go("/bangumi", { id: String(item.id) }) },
     coverImg(cardImage(item.images)),
-    el("div", { class: "name" }, item.nameCn || item.name),
+    el("div", { class: "name" }, item.nameCn || item.name || ""),
     sub ? el("div", { class: "sub" }, sub) : null);
 }
 
-async function renderTabPopular(container) {
+// 主页分区渲染：items 为空时整个分区不渲染（不留空白分区、不显示 null）
+function renderHomeSection(host, key, title, desc, items) {
+  const old = host.querySelector('[data-home-section="' + key + '"]');
+  if (old) old.remove();
+  if (!items.length) return;
+  const sec = el("div", { class: "home-section", "data-home-section": key });
+  sec.append(
+    el("div", { class: "section-header" },
+      el("div", { class: "section-title" }, title),
+      el("div", { class: "section-desc" }, desc)),
+    el("div", { class: "hscroll" }, ...items.map((it) => buildPosterCard(it, true))));
+  host.append(sec);
+}
+
+async function loadHomeSections(host) {
+  if (HOME_SECTIONS.loading) return;
+  if (HOME_SECTIONS.items) {
+    renderHomeSectionsFrom(HOME_SECTIONS.items, host);
+    return;
+  }
+  HOME_SECTIONS.loading = true;
+  const myEpoch = ++HOME_SECTIONS.epoch;
+  try {
+    const pages = await Promise.all([
+      fetchJson("/api/popular?offset=0").catch(() => null),
+      fetchJson("/api/popular?offset=24").catch(() => null),
+    ]);
+    if (myEpoch !== HOME_SECTIONS.epoch) return;
+    const seen = new Set();
+    const items = [];
+    for (const p of pages) for (const it of (p && p.items) || []) {
+      if (!it || seen.has(it.id)) continue;
+      seen.add(it.id);
+      items.push(it);
+    }
+    HOME_SECTIONS.items = items;
+    renderHomeSectionsFrom(items, host);
+  } catch (_) {
+    // 静默失败：分区隐藏，不挡主页
+  } finally {
+    if (myEpoch === HOME_SECTIONS.epoch) HOME_SECTIONS.loading = false;
+  }
+}
+
+function renderHomeSectionsFrom(items, host) {
+  const now = Date.now();
+  const withDate = items.map((it) => ({ it, u: updateInfoFor(it) })).filter((x) => x.u);
+  // 最近热播：近 90 天内开播，按评分数倒序，取 12
+  const hot = withDate.filter((x) => now - x.u.airDate.getTime() <= 90 * 86400000)
+    .sort((a, b) => (b.it.votes || 0) - (a.it.votes || 0)).slice(0, 12).map((x) => x.it);
+  // 新发：按开播日倒序，取 12
+  const fresh = withDate.slice().sort((a, b) => b.u.airDate - a.u.airDate).slice(0, 12).map((x) => x.it);
+  renderHomeSection(host, "hot", "最近热播", "近 90 天开播，按评分数排序", hot);
+  renderHomeSection(host, "new", "新发", "按开播日期倒序", fresh);
+}
+
+async function renderTabPopular(container, initialRegion) {
   // tab 重入：作废在途请求（epoch 失配即丢弃），并复位可能残留的 loading
   POPULAR_STATE.epoch++;
   POPULAR_STATE.loading = false;
+  // 路由参数 region（#/home?tab=popular&region=cn）可直达某个地区分类
+  if (initialRegion != null && REGIONS.some((r) => r.key === initialRegion)) {
+    POPULAR_STATE.region = initialRegion;
+    POPULAR_STATE.tag = "";
+  }
+  const titleText = () => regionLabel(POPULAR_STATE.region) || POPULAR_STATE.tag || "热门番组";
   const titleBtn = el("button", { class: "title-btn sl", type: "button" },
-    el("span", { class: "text" }, POPULAR_STATE.tag || "热门番组"), iconSvg("expand_more"));
+    el("span", { class: "text" }, titleText()), iconSvg("expand_more"));
   titleBtn.addEventListener("click", () => openTagPicker(container));
   const bar = appBar({
     large: true,
@@ -750,13 +866,38 @@ async function renderTabPopular(container) {
     ],
   });
   const page = el("div", { class: "page" });
+  const chipsRow = el("div", { class: "chips region-chips", role: "group", "aria-label": "地区分类" });
+  for (const r of REGIONS) {
+    chipsRow.append(el("button", {
+      class: "chip sl" + (POPULAR_STATE.region === r.key ? " is-selected" : ""),
+      type: "button",
+      "data-region": r.key,
+      onclick: () => setRegion(r.key),
+    }, r.label));
+  }
+  const sectionsHost = el("div", { class: "home-sections" });
   const progress = el("div", { class: "progress-line" });
   progress.style.visibility = "hidden";
   const grid = el("div", { class: "poster-grid" });
   const status = el("div", {});
-  page.append(progress, grid, status);
+  page.append(chipsRow, sectionsHost, progress, grid, status);
   container.append(bar, page);
   collapsible(bar);
+
+  // 地区分类切换：只改 region/tag 状态并重拉网格，不重建整个页面
+  function setRegion(key) {
+    if (POPULAR_STATE.region === key) return;
+    POPULAR_STATE.region = key;
+    POPULAR_STATE.tag = "";
+    chipsRow.querySelectorAll(".chip").forEach((c) =>
+      c.classList.toggle("is-selected", c.getAttribute("data-region") === key));
+    titleBtn.querySelector(".text").textContent = titleText();
+    // 分区（最近热播 / 新发）只在“全部”未过滤时显示
+    const unfiltered = key === "";
+    sectionsHost.style.display = unfiltered ? "" : "none";
+    if (unfiltered) loadHomeSections(sectionsHost);
+    loadMore(true);
+  }
 
   const topFab = el("button", { class: "fab sl is-hidden", "aria-label": "返回顶部" });
   topFab.innerHTML = ICONS.arrow_upward;
@@ -781,7 +922,7 @@ async function renderTabPopular(container) {
     if (!POPULAR_STATE.items.length) {
       status.append(emptyState({
         icon: "label",
-        title: POPULAR_STATE.tag ? "没有这个标签的番剧" : "暂无趋势数据",
+        title: (POPULAR_STATE.tag || POPULAR_STATE.region) ? "没有这个分类的番剧" : "暂无趋势数据",
         actions: [button("重新加载", { icon: "refresh", onclick: () => loadMore(true) })],
       }));
       return;
@@ -802,15 +943,32 @@ async function renderTabPopular(container) {
     const myEpoch = POPULAR_STATE.epoch;
     renderItems();
     try {
-      const url = POPULAR_STATE.tag
-        ? "/api/popular?tag=" + encodeURIComponent(POPULAR_STATE.tag)
-        : "/api/popular?offset=" + POPULAR_STATE.items.length;
-      const data = await fetchJson(url);
-      if (POPULAR_STATE.epoch !== myEpoch) return;
-      const items = data.items || [];
-      POPULAR_STATE.items = POPULAR_STATE.items.concat(items);
-      // tag 模式后端是一次性返回（rank 随机），不再续翻
-      if (POPULAR_STATE.tag || !items.length) POPULAR_STATE.exhausted = true;
+      const region = REGIONS.find((r) => r.key === POPULAR_STATE.region);
+      if (region && region.tags) {
+        // 地区模式：tag 搜索一次返回；多 tag 取并集去重，再用主导地区标签过滤
+        const lists = await Promise.all(region.tags.map((t) =>
+          fetchJson("/api/popular?tag=" + encodeURIComponent(t)).then((d) => d.items || []).catch(() => [])));
+        if (POPULAR_STATE.epoch !== myEpoch) return;
+        const seen = new Set();
+        const merged = [];
+        for (const it of lists.flat()) {
+          if (!it || seen.has(it.id)) continue;
+          seen.add(it.id);
+          if (keepForRegion(it, region.key)) merged.push(it);
+        }
+        POPULAR_STATE.items = merged;
+        POPULAR_STATE.exhausted = true;
+      } else {
+        const url = POPULAR_STATE.tag
+          ? "/api/popular?tag=" + encodeURIComponent(POPULAR_STATE.tag)
+          : "/api/popular?offset=" + POPULAR_STATE.items.length;
+        const data = await fetchJson(url);
+        if (POPULAR_STATE.epoch !== myEpoch) return;
+        const items = data.items || [];
+        POPULAR_STATE.items = POPULAR_STATE.items.concat(items);
+        // tag 模式后端是一次性返回（rank 随机），不再续翻
+        if (POPULAR_STATE.tag || !items.length) POPULAR_STATE.exhausted = true;
+      }
     } catch (e) {
       if (POPULAR_STATE.epoch !== myEpoch) return;
       if (!POPULAR_STATE.items.length) {
@@ -832,6 +990,9 @@ async function renderTabPopular(container) {
   }
 
   onScrollBottom(grid, () => loadMore(false));
+  // 分区（最近热播 / 新发）只在未过滤的主页显示；过滤时隐藏，不挡网格
+  if (!POPULAR_STATE.region && !POPULAR_STATE.tag) loadHomeSections(sectionsHost);
+  else sectionsHost.style.display = "none";
   await loadMore(true);
 }
 
@@ -846,6 +1007,7 @@ function openTagPicker(container) {
           close();
           if (t.key === POPULAR_STATE.tag) return;
           POPULAR_STATE.tag = t.key;
+          POPULAR_STATE.region = ""; // 题材标签与地区分类互斥：选了题材就回到全部地区
           container.innerHTML = "";
           renderTabPopular(container);
         },
