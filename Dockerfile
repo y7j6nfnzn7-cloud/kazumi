@@ -30,6 +30,11 @@ RUN curl -L -o /tmp/kazumiweb.tar.gz \
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
+# 自改前端（2026-11-07）：web/ 里是改过的 app.js / player.js / styles.css / index.html，
+# 覆盖上游 v0.2.0 包里的同名文件：一键横屏、双击快进、首页更新日期、国产分类、封面提速。
+# 上游 tarball 不变，只换前端静态文件；后端二进制和启动命令都不动。
+COPY web/ /app/web/
+
 ENV KAZUMI_WEB_HEADLESS=1
 
 EXPOSE 10000
