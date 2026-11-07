@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libayatana-appindicator3-1 \
     curl \
     ca-certificates \
+    python3 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -42,6 +44,10 @@ COPY web/styles.css /app/web/styles.css
 # 覆盖上游 v0.2.0 包里的同名文件：一键横屏、双击快进、首页更新日期、国产分类、封面提速。
 # 上游 tarball 不变，只换前端静态文件；后端二进制和启动命令都不动。
 COPY web/ /app/web/
+
+# 字幕插件（2026-11-07）：Python 边车服务（反向代理 + /api/subs 字幕端点），
+# 含 VTT 缓存种子。无 pip 依赖，只有标准库。
+COPY subs/ /app/subs/
 
 ENV KAZUMI_WEB_HEADLESS=1
 

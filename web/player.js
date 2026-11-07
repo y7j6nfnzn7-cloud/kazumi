@@ -245,10 +245,36 @@ function dualSubPaths(bid, episode, ovlLang) {
   const id = String(bid || "");
   if (!id) return null;
   return {
-    ovl: "/assets/" + id + "-ep" + ep + "." + ovlLang + ".vtt",
-    zh: "/assets/" + id + "-ep" + ep + ".zh.vtt",
+    // 主：字幕插件端点（只读缓存；缓存没有就 404，不生成、不等待）。
+    ovl: "/api/subs/" + id + "/ep" + ep + "?lang=" + ovlLang,
+    zh: "/api/subs/" + id + "/ep" + ep + "?lang=zh",
+    // 备：主站静态种子文件（插件端点挂了也能播双语）。
+    ovlStatic: "/assets/" + id + "-ep" + ep + "." + ovlLang + ".vtt",
+    zhStatic: "/assets/" + id + "-ep" + ep + ".zh.vtt",
     hardsubZh: true,
   };
+}
+
+// 预热：详情页/播放页打开时调用，fire-and-forget。让插件在后台为
+// 指定集准备字幕（字幕库 → Groq 生成 → 进缓存），不等结果、不动 UI。
+// 播放时只读缓存，所以预热必须在播放之前发生。
+// episodes: [集号, ...] 或 [{ep: 集号, url: AGE 播放页地址}, ...]
+// （有 url 时库里没有的番才能走 Groq 回退生成；没有 url 只走字幕库）。
+function warmSubs(bid, episodes) {
+  try {
+    if (!bid || !Array.isArray(episodes)) return;
+    for (const item of episodes) {
+      const ep = typeof item === "number" ? item : parseInt(item && item.ep, 10);
+      const url = typeof item === "object" && item ? (item.url || "") : "";
+      if (!ep || ep < 1) continue;
+      fetch("/api/subs/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bid: String(bid), ep, episodeUrl: url || undefined }),
+        keepalive: true,
+      }).catch(() => {});
+    }
+  } catch (_) {}
 }
 function parseVtt(text) {
   const cues = [];
@@ -295,6 +321,7 @@ class DualSubLayer {
     try { this.mode = localStorage.getItem("dualSubMode") || "ja-zh"; } catch (_) {}
     if (!["ja-zh", "en-zh", "zh", "off"].includes(this.mode)) this.mode = "ja-zh";
     this.ovlCues = []; this.zhCues = []; this.loaded = false; this.loadError = "";
+    this.subSource = ""; // 字幕来源（Kitsunekko / TVsubtitles / Groq Whisper / 机器生成），端点经 X-Sub-Source 返回
     this.node = document.createElement("div");
     this.node.className = "dual-sub";
     this.ovlNode = document.createElement("div");
@@ -326,16 +353,34 @@ class DualSubLayer {
     // 存过的双语档跟着当前番的语言走（ja-zh/en-zh 互换）；仅中文/关原样保留。
     if (this.mode === "ja-zh" || this.mode === "en-zh") this.mode = this.dualMode;
     this.entry = dualSubPaths(this.bid, this.episode, this.ovlLang);
-    // 2) 探测叠加语言文件：不存在（404）= 本集没有双语字幕，静默无字幕播放，
-    // 不设 loadError、不弹红字。文件存在但解析为空才算加载失败。
+    // 2) 先读插件端点（只读缓存，5 秒超时；缓存没有 = 本集还没有双语
+    // 字幕，静默无字幕播放，不设 loadError、不弹红字、不显示“生成中”）。
+    // 端点失败再回退到主站静态种子文件。两个都没有才算没有字幕。
     let ovlText = null;
+    this.subSource = "";
+    const fetchText = async (url, timeoutMs) => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, timeoutMs);
+      try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        if (!r.ok) return null;
+        const src = r.headers ? (r.headers.get("X-Sub-Source") || "") : "";
+        return { text: await r.text(), source: src };
+      } catch (e) { return null; } finally { clearTimeout(timer); }
+    };
+    let got = await fetchText(this.entry.ovl, 5000);
+    if (!got) got = await fetchText(this.entry.ovlStatic, 5000);
+    if (!got) { this.entry = null; this.done = true; this.render(); if (typeof this.onReady === "function") this.onReady(); return; }
+    ovlText = got.text;
+    this.subSource = got.source || "";
     try {
-      const r = await fetch(this.entry.ovl);
-      if (!r.ok) { this.entry = null; this.done = true; this.render(); if (typeof this.onReady === "function") this.onReady(); return; }
-      ovlText = await r.text();
-    } catch (e) { this.entry = null; this.done = true; this.render(); if (typeof this.onReady === "function") this.onReady(); return; }
-    try {
-      const zhText = await fetch(this.entry.zh).then((r) => r.ok ? r.text() : "").catch(() => "");
+      let zhText = "";
+      const zhGot = await fetchText(this.entry.zh, 3000);
+      if (zhGot) zhText = zhGot.text;
+      else {
+        const zhStatic = await fetchText(this.entry.zhStatic, 3000);
+        if (zhStatic) zhText = zhStatic.text;
+      }
       this.ovlCues = parseVtt(ovlText);
       this.zhCues = zhText ? parseVtt(zhText) : [];
       this.loaded = this.ovlCues.length > 0;
@@ -763,6 +808,11 @@ async function renderPlayer(params) {
     };
     if (idx > 0) { prevBtn.disabled = false; prevBtn.addEventListener("click", () => goEp(idx - 1)); }
     if (idx < eps.length - 1) { nextBtn.disabled = false; nextBtn.addEventListener("click", () => goEp(idx + 1)); }
+    // 预热下一集（带播放地址，库里没有才能走 Groq 回退）：本集播着的
+    // 时候后台准备好，用户点下一集时缓存里已经有了。
+    if (idx + 1 < eps.length) {
+      warmSubs(bid, [{ ep: epNum + 1, url: eps[idx + 1] && eps[idx + 1].src }]);
+    }
   });
 
   const typeLabel = data.streamType === "hls"
@@ -806,9 +856,14 @@ async function renderPlayer(params) {
       dualOpt.textContent = "字幕 " + dualSub.dualLabel;
       subSelect.value = dualSub.mode;
       subSelect.style.display = "";
-      toast(dualSub.dualLabel + "字幕已加载：" + (dualSub.ovlLang === "en" ? "英文 " : "日文 ") + dualSub.ovlCues.length + " 条（语音识别） / 中文 " + dualSub.zhCues.length + " 条（画面识别），机器生成仅供参考");
+      toast(dualSub.dualLabel + "字幕已加载：" + (dualSub.ovlLang === "en" ? "英文 " : "日文 ") + dualSub.ovlCues.length + " 条" + (dualSub.zhCues.length ? " / 中文 " + dualSub.zhCues.length + " 条" : "") + (dualSub.subSource ? "（" + dualSub.subSource + "）" : "") + (dualSub.subSource && dualSub.subSource.indexOf("Whisper") >= 0 ? "，机器生成仅供参考" : ""));
     }
     // 无字幕文件（entry 为空、无 loadError）：保持隐藏，不提示。
+    // 但静默触发一次本集预热（带播放地址），让插件在后台准备好，
+    // 下次打开本集或播到它时缓存里就有了；本次播放不等、不显示加载。
+    if (!dualSub.loaded && !dualSub.loadError) {
+      warmSubs(bid, [{ ep: epNum, url: episodeUrl }]);
+    }
   };
   dualSub.onReady = showSubUI;
   if (dualSub.done) showSubUI();

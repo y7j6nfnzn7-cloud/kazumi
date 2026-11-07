@@ -166,6 +166,28 @@ function fetchJsonPost(url, body) {
 function fetchJsonPut(url, body) {
   return fetchJsonOnce(url, { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body) });
 }
+
+// 双语字幕预热：详情页/选集页打开时调用，fire-and-forget。让字幕插件在
+// 后台为指定集准备字幕（字幕库 → Groq 生成 → 进缓存），不等结果、不动 UI。
+// 播放时只读缓存，所以预热必须在播放之前发生；不许在播放时显示“生成中”。
+// episodes: [集号, ...] 或 [{ep: 集号, url: AGE 播放页地址}, ...]
+// （有 url 时库里没有的番才能走 Groq 回退生成；没有 url 只走字幕库）。
+function warmSubs(bid, episodes) {
+  try {
+    if (!bid || !Array.isArray(episodes)) return;
+    for (const item of episodes) {
+      const ep = typeof item === "number" ? item : parseInt(item && item.ep, 10);
+      const url = typeof item === "object" && item ? (item.url || "") : "";
+      if (!ep || ep < 1) continue;
+      fetch("/api/subs/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bid: String(bid), ep, episodeUrl: url || undefined }),
+        keepalive: true,
+      }).catch(() => {});
+    }
+  } catch (_) {}
+}
 // 设备标识：区分同一服务下的不同浏览器/设备，历史列表按设备过滤
 // （观看进度本身全局共享，跨设备续播不受影响）。
 function getDeviceId() {
@@ -2027,6 +2049,10 @@ async function renderBangumiDetail(params) {
   }
   page.innerHTML = "";
 
+  // 详情页打开即预热双语字幕：第 1、2 集先准备好（字幕库 → 进缓存），
+  // 用户点播放时缓存里已经有了。没看过的番下一集就是第 1 集。
+  warmSubs(id, [1, 2]);
+
   // Hero：SliverAppBar.medium 的模糊封面背景 + BangumiInfoCardV
   const cover = bestBangumiImage(bangumi.images);
   const hero = el("div", { class: "hero" });
@@ -2552,6 +2578,12 @@ async function startPlayback(ctx) {
     go("/episodes", { plugin: ctx.plugin, src: ctx.src, title: ctx.title, bid: ctx.bid });
     return;
   }
+  // 预热本集（带播放地址，库里没有才能走 Groq 回退）+ 下一集。
+  // 点播放前就开始准备，播放时只读缓存。
+  warmSubs(ctx.bid, [
+    { ep: epIdx + 1, url: eps[epIdx] && eps[epIdx].src },
+    { ep: epIdx + 2, url: eps[epIdx + 1] && eps[epIdx + 1].src },
+  ]);
   go("/play", playEpisodeParams(ctx, eps[epIdx], epIdx, roadIdx));
 }
 
@@ -2720,6 +2752,17 @@ async function renderEpisodes(params) {
     error = e.message;
   }
   loading = false;
+  // 选集页打开即预热：下一集（上次看到的集，没看过就是第 1 集）+ 再下一集。
+  if (info && info.roads && info.roads.length) {
+    const lw = info.lastWatched;
+    const roadIdx = lw && info.roads[lw.road] ? lw.road : 0;
+    const eps = (info.roads[roadIdx] || {}).episodes || [];
+    const nextEp = lw && eps[lw.episode - 1] ? lw.episode : 1;
+    warmSubs(bid, [
+      { ep: nextEp, url: eps[nextEp - 1] && eps[nextEp - 1].src },
+      { ep: nextEp + 1, url: eps[nextEp] && eps[nextEp].src },
+    ]);
+  }
   if (activeTab === "episodes") renderTabBody();
 }
 
