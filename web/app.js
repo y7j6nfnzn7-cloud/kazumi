@@ -751,7 +751,7 @@ async function renderHome(params) {
 // 推荐（popular_page.dart）
 // ============================================================
 const POPULAR_TAGS = ["国产", "日常", "原创", "校园", "搞笑", "奇幻", "百合", "恋爱", "悬疑", "热血", "后宫", "机战"];
-const POPULAR_STATE = { tag: "", region: "", items: [], loading: false, exhausted: false, epoch: 0 };
+const POPULAR_STATE = { tag: "", region: "", items: [], kidsItems: [], loading: false, exhausted: false, epoch: 0 };
 
 // ====== 地区分类（全局通用：任何番都按标签判断，不写死片名） ======
 // 信号来源：Bangumi 用户标签（item.tags，按使用人数倒序返回）。
@@ -797,6 +797,40 @@ function regionOf(item) {
 function keepForRegion(item, key) {
   const r = regionOf(item);
   return r === "" || r === key;
+}
+
+// ====== 少儿频道（2026-11-07 用户亲口定）：动漫和少儿看的不能放一起排序 ======
+// 少儿频道单独排一节；国漫主榜里不放少儿；主榜先排近 5 年内热播、其余往后排。
+// 识别信号（不写死单个片名，只认类别信号 + 公认的少儿 IP）：
+//   1) Bangumi 标签含明确的少儿信号（子供向/少儿/儿童/幼儿/低幼）；
+//   2) 片名含公认的少儿 IP（喜羊羊、熊出没、蓝猫……）。“童年”不算少儿信号，
+//      它常是怀旧标签——很早的老动漫也带“童年”，那类归主榜的“往后排”，不进少儿节。
+// 实测依据（2026-11-07 线上 /api/popular?tag=国产）：少儿项的标签里没有
+// “少儿/儿童”，只有“童年”+IP 名；tag=少儿 只返回 1 条、tag=儿童 只 7 条，
+// 所以少儿不能靠 tag 搜索单拉，只能从国漫结果里分出来。
+const KIDS_TAGS = ["子供向", "少儿", "儿童", "幼儿", "低幼"];
+const KIDS_NAME_KEYWORDS = ["喜羊羊", "熊出没", "蓝猫", "猪猪侠", "汪汪队", "小猪佩奇", "巧虎", "巴啦啦小魔仙", "铠甲勇士", "赛尔号", "洛克王国", "果宝特攻", "开心宝贝", "开心超人", "大头儿子", "舒克", "贝塔", "葫芦娃", "葫芦兄弟", "黑猫警长", "铁甲威虫", "骑刃王", "神兵小将", "哪吒传奇", "福五鼠", "象棋王"];
+function isKids(item) {
+  if (!item) return false;
+  const tags = (item.tags || []).map((t) => (t.name || "").trim()).filter(Boolean);
+  if (tags.some((t) => KIDS_TAGS.includes(t))) return true;
+  const name = (item.nameCn || item.name || "");
+  return KIDS_NAME_KEYWORDS.some((k) => name.includes(k));
+}
+// 国漫主榜排序（2026-11-07 用户亲口定）：近 5 年内开播的热播在前（按 rank），
+// 其余（更早开播、或拿不到开播日）往后排（同样按 rank）。5 年按当前日期动态算，不写死 2021。
+const RECENT_YEARS = 5;
+function isRecent(item) {
+  const u = updateInfoFor(item);
+  if (!u || !u.airDate) return false;
+  return Date.now() - u.airDate.getTime() <= RECENT_YEARS * 365.25 * 86400000;
+}
+function sortCnMain(items) {
+  const recent = [], older = [];
+  for (const it of items) (isRecent(it) ? recent : older).push(it);
+  recent.sort(compareHot);
+  older.sort(compareHot);
+  return recent.concat(older);
 }
 
 // 主页分区（最近热播 / 新发）：只在“全部”未过滤时显示，数据来自默认热门流前两页。
@@ -956,8 +990,9 @@ async function renderTabPopular(container, initialRegion) {
   const progress = el("div", { class: "progress-line" });
   progress.style.visibility = "hidden";
   const grid = el("div", { class: "poster-grid" });
+  const kidsHost = el("div", { class: "kids-section-host" });
   const status = el("div", {});
-  page.append(chipsRow, sectionsHost, progress, grid, status);
+  page.append(chipsRow, sectionsHost, progress, grid, kidsHost, status);
   container.append(bar, page);
   collapsible(bar);
 
@@ -1005,14 +1040,30 @@ async function renderTabPopular(container, initialRegion) {
       return;
     }
     for (; rendered < POPULAR_STATE.items.length; rendered++) grid.append(buildPosterCard(POPULAR_STATE.items[rendered]));
+    renderKidsSection();
+  }
+
+  // 少儿频道单独一节（只在国漫分类、且分出少儿项时显示；和主榜分开排）
+  function renderKidsSection() {
+    kidsHost.innerHTML = "";
+    if (POPULAR_STATE.region !== "cn" || !POPULAR_STATE.kidsItems.length) return;
+    const sec = el("div", { class: "kids-section" });
+    sec.append(
+      el("div", { class: "section-header" },
+        el("div", { class: "section-title" }, "少儿频道"),
+        el("div", { class: "section-desc" }, "单独排序，不和动漫混排")),
+      el("div", { class: "poster-grid" }, ...POPULAR_STATE.kidsItems.map((it) => buildPosterCard(it))));
+    kidsHost.append(sec);
   }
 
   async function loadMore(reset) {
     if (POPULAR_STATE.loading) return;
     if (reset) {
       POPULAR_STATE.items = [];
+      POPULAR_STATE.kidsItems = [];
       POPULAR_STATE.exhausted = false;
       grid.innerHTML = "";
+      kidsHost.innerHTML = "";
       rendered = 0;
     }
     if (POPULAR_STATE.exhausted) return;
@@ -1033,9 +1084,21 @@ async function renderTabPopular(container, initialRegion) {
           seen.add(it.id);
           if (keepForRegion(it, region.key)) merged.push(it);
         }
-        // 地区分类不随机取样：合并后按热度（Bangumi 排名升序，无 rank 的按评分数垫底）排完再渲染
-        merged.sort(compareHot);
-        POPULAR_STATE.items = merged;
+        // 地区分类不随机取样：合并后排完再渲染。
+        // 国漫（cn）：少儿分出来单独排一节；主榜先排近 5 年内热播、其余往后排
+        // （2026-11-07 用户亲口定：动漫和少儿不能放一起排，近 5 年热播在前）。
+        // 其他地区仍按热度（Bangumi 排名升序，无 rank 的按评分数垫底）排。
+        if (region.key === "cn") {
+          const kids = [], main = [];
+          for (const it of merged) (isKids(it) ? kids : main).push(it);
+          kids.sort(compareHot);
+          POPULAR_STATE.items = sortCnMain(main);
+          POPULAR_STATE.kidsItems = kids;
+        } else {
+          merged.sort(compareHot);
+          POPULAR_STATE.items = merged;
+          POPULAR_STATE.kidsItems = [];
+        }
         POPULAR_STATE.exhausted = true;
       } else {
         const url = POPULAR_STATE.tag

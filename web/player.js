@@ -779,14 +779,17 @@ async function toggleLandscape(video, wrap, btn) {
   if (wrap.classList.contains("is-rotated")) { exitRotated(wrap, btn); return; }
   if (document.fullscreenElement) { await document.exitFullscreen().catch(() => {}); setLandscapeLabel(btn, "横屏"); return; }
   if (inWebkitFullscreen(video)) {
-    try { video.webkitExitFullscreen(); } catch (_) {}
-    // 等原生全屏退出（webkitendfullscreen）再旋转，避免两层叠加
-    await new Promise((resolve) => {
-      let done = false;
-      const finish = () => { if (!done) { done = true; resolve(); } };
-      video.addEventListener("webkitendfullscreen", finish, { once: true });
-      setTimeout(finish, 800);
-    });
+    // 等原生全屏退出（webkitendfullscreen）再旋转，避免两层叠加。
+    // 第一次退出若被忽略（转场进行中调用会被吞），再试一次。
+    for (let attempt = 0; attempt < 2 && inWebkitFullscreen(video); attempt++) {
+      try { video.webkitExitFullscreen(); } catch (_) {}
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        video.addEventListener("webkitendfullscreen", finish, { once: true });
+        setTimeout(finish, 800);
+      });
+    }
   }
   if (!IS_IOS && document.fullscreenEnabled && wrap.requestFullscreen) {
     try {
@@ -813,8 +816,22 @@ async function toggleLandscape(video, wrap, btn) {
 function bindNativeFullscreenGuard(video, wrap, btn) {
   if (!video || typeof video.webkitEnterFullscreen !== "function") return;
   video.addEventListener("webkitbeginfullscreen", () => {
+    // iOS 原生全屏会丢掉 HTML 叠加层（字幕、点屏快进全没）、控制层也关不掉：
+    // 退出它再走 CSS 旋转横屏。退出是异步的，必须等 webkitendfullscreen
+    // （或 800ms 超时）再旋转，否则旋转会被原生全屏层盖住、看起来像
+    // “横屏按钮无效、只有一个全屏能点”（2026-11-07 真机反馈）。
     try { video.webkitExitFullscreen(); } catch (_) {}
-    if (!wrap.classList.contains("is-rotated")) enterRotated(wrap, btn);
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      if (!wrap.classList.contains("is-rotated")) enterRotated(wrap, btn);
+    };
+    video.addEventListener("webkitendfullscreen", finish, { once: true });
+    setTimeout(() => {
+      finish();
+      // 退出若被忽略（转场进行中调用会被吞）：转场已结束，再试一次退出。
+      try { if (inWebkitFullscreen(video)) video.webkitExitFullscreen(); } catch (_) {}
+    }, 800);
   });
   video.addEventListener("webkitendfullscreen", () => {
     if (!wrap.classList.contains("is-rotated")) setLandscapeLabel(btn, "横屏");
