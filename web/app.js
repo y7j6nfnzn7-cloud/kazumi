@@ -834,20 +834,55 @@ function isKids(item) {
   if (tags.some((t) => KIDS_TAGS.includes(t))) return true;
   return KIDS_NAME_KEYWORDS.some((k) => name.includes(k));
 }
-// 国漫主榜排序（2026-11-07 用户亲口定）：近 5 年内开播的热播在前（按 rank），
-// 其余（更早开播、或拿不到开播日）往后排（同样按 rank）。5 年按当前日期动态算，不写死 2021。
-const RECENT_YEARS = 5;
-function isRecent(item) {
-  const u = updateInfoFor(item);
-  if (!u || !u.airDate) return false;
-  return Date.now() - u.airDate.getTime() <= RECENT_YEARS * 365.25 * 86400000;
-}
+// 国漫主榜排序（2026-11-08 用户亲口定，取代 11-07 的“近 5 年”规则）：
+//   时间窗：2016 年起（8 年排行，2016-01-01 至今）；
+//   按网络热度排：主榜顶部是置顶热榜（CN_HOT_IDS，按真实网络热度排好，
+//   保证凡人修仙传、光阴之外这些真热的每次都在、且在前面）；其余 2016 年起
+//   的按 rank 排；2016 年以前的（或拿不到开播日）往后排。
+//   注意：Bangumi rank 对国漫不准——斗破苍穹/斗罗大陆在 Bangumi 上排一万名
+//   开外（小众社区打分低），但网上是几十亿播放的顶流；反过来不少冷门番在
+//   Bangumi 上 rank 很好。所以热度不能用 rank 定，用置顶名单定；rank 只用
+//   来排置顶之外的其余部分。少儿照旧分走，不进主榜。
+const CN_HOT_START = new Date(2016, 0, 1);
+// 置顶热榜：按真实网络热度（播放量/讨论度）排，最热在前；id 是 Bangumi 条目号。
+// 取第一季/主条目，每部只取一条，不重复占位。完美世界/少年歌行/遮天/不良人
+// 因 Bangumi 接口不稳暂未拿到稳定 id，拿到后补进（不在此硬猜 id）。
+const CN_HOT_IDS = [
+  153197, // 斗破苍穹 (2017)
+  199425, // 斗罗大陆 (2018)
+  223147, // 凡人修仙传 (2020)
+  244239, // 吞噬星空 (2020)
+  345802, // 仙逆 (2023)
+  458926, // 光阴之外 (2025)
+  345803, // 斗罗大陆2 绝世唐门 (2023)
+  345825, // 剑来 (2024)
+  244008, // 刺客伍六七 (2018)
+  204863, // 雾山五行 (2016)
+  175457, // 一人之下 (2016)
+  156591, // 镇魂街 (2016)
+  269537, // 灵笼 (2019)
+  289101, // 天官赐福 (2020)
+  199423, // 魔道祖师 前尘篇 (2018)
+  153196, // 全职高手 (2017)
+  456159, // 牧神记 (2024)
+  223148, // 星辰变 (2018)
+  224641, // 武动乾坤 (2019)
+  291213, // 大王饶命 (2021)
+];
 function sortCnMain(items) {
-  const recent = [], older = [];
-  for (const it of items) (isRecent(it) ? recent : older).push(it);
+  const hotOrder = new Map(CN_HOT_IDS.map((id, i) => [id, i]));
+  const hot = [], recent = [], older = [];
+  for (const it of items) {
+    if (hotOrder.has(it.id)) { hot.push(it); continue; }
+    const u = updateInfoFor(it);
+    const d = u && u.airDate;
+    if (d && d >= CN_HOT_START) recent.push(it);
+    else older.push(it);
+  }
+  hot.sort((a, b) => hotOrder.get(a.id) - hotOrder.get(b.id));
   recent.sort(compareHot);
   older.sort(compareHot);
-  return recent.concat(older);
+  return hot.concat(recent, older);
 }
 
 // 主页分区（最近热播 / 新发）：只在“全部”未过滤时显示，数据来自默认热门流前两页。
@@ -1091,19 +1126,28 @@ async function renderTabPopular(container, initialRegion) {
       const region = REGIONS.find((r) => r.key === POPULAR_STATE.region);
       if (region && region.tags) {
         // 地区模式：tag 搜索一次返回；多 tag 取并集去重，再用主导地区标签过滤
-        const lists = await Promise.all(region.tags.map((t) =>
-          fetchJson("/api/popular?tag=" + encodeURIComponent(t)).then((d) => d.items || []).catch(() => [])));
+        // 国漫（cn）再并行拉一份置顶热榜（/api/bangumi/{id}，按 id 取）：tag 搜索
+        // 是随机抽样，凡人修仙传/光阴之外经常抽不到，置顶拉取保证它们每次都在。
+        // 单个 id 失败不影响整体（catch 到 null 后过滤掉）。
+        const isCn = region.key === "cn";
+        const [lists, hotItems] = await Promise.all([
+          Promise.all(region.tags.map((t) =>
+            fetchJson("/api/popular?tag=" + encodeURIComponent(t)).then((d) => d.items || []).catch(() => []))),
+          isCn
+            ? Promise.all(CN_HOT_IDS.map((id) => fetchJson("/api/bangumi/" + id).catch(() => null)))
+            : Promise.resolve([]),
+        ]);
         if (POPULAR_STATE.epoch !== myEpoch) return;
         const seen = new Set();
         const merged = [];
-        for (const it of lists.flat()) {
+        for (const it of lists.flat().concat(hotItems || [])) {
           if (!it || seen.has(it.id)) continue;
           seen.add(it.id);
           if (keepForRegion(it, region.key)) merged.push(it);
         }
         // 地区分类不随机取样：合并后排完再渲染。
-        // 国漫（cn）：少儿分出来单独排一节；主榜先排近 5 年内热播、其余往后排
-        // （2026-11-07 用户亲口定：动漫和少儿不能放一起排，近 5 年热播在前）。
+        // 国漫（cn）：少儿分出来单独排一节；主榜按 2026-11-08 新规则排
+        // （2016 年起、按网络热度：置顶热榜在前，其余按 rank；见 sortCnMain）。
         // 其他地区仍按热度（Bangumi 排名升序，无 rank 的按评分数垫底）排。
         if (region.key === "cn") {
           const kids = [], main = [];
