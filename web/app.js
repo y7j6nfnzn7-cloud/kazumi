@@ -642,7 +642,13 @@ function updateInfoFor(item) {
   // 未开播：下次更新就是开播日本身，不是这周的同一星期
   if (first > today) next.setTime(first.getTime());
   let aired = null, finished = false;
-  if (first <= today) {
+  if (item.airedCount != null) {
+    // 实际已播集数（从分集接口数出来的）：跟真实更新走，不按时间推算。
+    // 停播/延期时集数不涨，日期就不会凭空往前跑；新一集出了集数涨了，
+    // 日期跟着变（2026-11-08 用户亲口定：更新日期要同步更新）。
+    aired = item.airedCount;
+    if (total && aired >= total) { finished = true; aired = total; }
+  } else if (first <= today) {
     const weeks = Math.floor((today - first) / 86400000 / 7);
     aired = weeks + 1;
     if (total && aired >= total) { finished = true; aired = total; }
@@ -751,7 +757,7 @@ async function renderHome(params) {
 // 推荐（popular_page.dart）
 // ============================================================
 const POPULAR_TAGS = ["国产", "日常", "原创", "校园", "搞笑", "奇幻", "百合", "恋爱", "悬疑", "热血", "后宫", "机战"];
-const POPULAR_STATE = { tag: "", region: "", items: [], kidsItems: [], loading: false, exhausted: false, epoch: 0 };
+const POPULAR_STATE = { tag: "", region: "", items: [], kidsItems: [], loading: false, exhausted: false, epoch: 0, searchOffset: 0 };
 
 // ====== 地区分类（全局通用：任何番都按标签判断，不写死片名） ======
 // 信号来源：Bangumi 用户标签（item.tags，按使用人数倒序返回）。
@@ -835,15 +841,16 @@ function isKids(item) {
   return KIDS_NAME_KEYWORDS.some((k) => name.includes(k));
 }
 // 国漫主榜排序（2026-11-08 用户亲口定，取代 11-07 的“近 5 年”规则）：
+// 国漫主榜排序（2026-11-08 用户亲口定）：
 //   时间窗：2016 年起（8 年排行，2016-01-01 至今）；
 //   按网络热度排：主榜顶部是置顶热榜（CN_HOT_IDS，按真实网络热度排好，
-//   保证凡人修仙传、光阴之外这些真热的每次都在、且在前面）；其余 2016 年起
-//   的按 rank 排；2016 年以前的（或拿不到开播日）往后排。
+//   保证凡人修仙传、光阴之外这些真热的每次都在、且在前面）；置顶之下是
+//   /api/bangumi/search 按热度（sort=heat）翻页拉到的全部国漫（见 loadMore
+//   地区分支），不再是只取 20 条随机的 tag 搜索。少儿照旧分走，不进主榜。
 //   注意：Bangumi rank 对国漫不准——斗破苍穹/斗罗大陆在 Bangumi 上排一万名
 //   开外（小众社区打分低），但网上是几十亿播放的顶流；反过来不少冷门番在
-//   Bangumi 上 rank 很好。所以热度不能用 rank 定，用置顶名单定；rank 只用
-//   来排置顶之外的其余部分。少儿照旧分走，不进主榜。
-const CN_HOT_START = new Date(2016, 0, 1);
+//   Bangumi 上 rank 很好。所以热度不能用 rank 定，置顶用名单定、其余用
+//   搜索的 heat 排序定。
 // 置顶热榜：按真实网络热度（播放量/讨论度）排，最热在前；id 是 Bangumi 条目号。
 // 取第一季/主条目，每部只取一条，不重复占位。完美世界/少年歌行/遮天/不良人
 // 因 Bangumi 接口不稳暂未拿到稳定 id，拿到后补进（不在此硬猜 id）。
@@ -869,21 +876,8 @@ const CN_HOT_IDS = [
   224641, // 武动乾坤 (2019)
   291213, // 大王饶命 (2021)
 ];
-function sortCnMain(items) {
-  const hotOrder = new Map(CN_HOT_IDS.map((id, i) => [id, i]));
-  const hot = [], recent = [], older = [];
-  for (const it of items) {
-    if (hotOrder.has(it.id)) { hot.push(it); continue; }
-    const u = updateInfoFor(it);
-    const d = u && u.airDate;
-    if (d && d >= CN_HOT_START) recent.push(it);
-    else older.push(it);
-  }
-  hot.sort((a, b) => hotOrder.get(a.id) - hotOrder.get(b.id));
-  recent.sort(compareHot);
-  older.sort(compareHot);
-  return hot.concat(recent, older);
-}
+// （sortCnMain 已移除：地区分类改走 /api/bangumi/search 分页取数，不再是
+//  一次性 tag 随机样本 + 本地分桶排序。见 loadMore 地区分支。）
 
 // 主页分区（最近热播 / 新发）：只在“全部”未过滤时显示，数据来自默认热门流前两页。
 // 最近热播定义：近 90 天内开播，按 Bangumi 排名（rank）升序；新发定义：按开播日倒序。
@@ -923,6 +917,40 @@ function pumpBangumiDetail() {
       .finally(() => { BANGUMI_DETAIL_RUNNING--; pumpBangumiDetail(); });
   }
 }
+// 分集数回填：拿 /api/bangumi/{id}/episodes 的条数当“实际已播集数”，
+// 让更新日期跟真实更新走（2026-11-08 用户亲口定）。带内存缓存 + 并发上限 6。
+const BANGUMI_EPISODES_CACHE = new Map();
+const BANGUMI_EPISODES_QUEUE = [];
+let BANGUMI_EPISODES_RUNNING = 0;
+function queueBangumiEpisodes(id) {
+  if (BANGUMI_EPISODES_CACHE.has(id)) return BANGUMI_EPISODES_CACHE.get(id);
+  const p = new Promise((resolve) => { BANGUMI_EPISODES_QUEUE.push({ id, resolve }); pumpBangumiEpisodes(); });
+  BANGUMI_EPISODES_CACHE.set(id, p);
+  return p;
+}
+function pumpBangumiEpisodes() {
+  while (BANGUMI_EPISODES_RUNNING < 6 && BANGUMI_EPISODES_QUEUE.length) {
+    const job = BANGUMI_EPISODES_QUEUE.shift();
+    BANGUMI_EPISODES_RUNNING++;
+    fetchJson("/api/bangumi/" + encodeURIComponent(job.id) + "/episodes")
+      .then((d) => job.resolve(Array.isArray(d && d.items) ? d.items.length : null))
+      .catch(() => job.resolve(null))
+      .finally(() => { BANGUMI_EPISODES_RUNNING--; pumpBangumiEpisodes(); });
+  }
+}
+// 只给“近期开播”（2 年内）的番拉实际已播集数：老番早已完结，
+// 时间推算封顶到总集数就是对的，不用多拉一次。
+function needsAiredCount(item) {
+  const u = updateInfoFor(item);
+  if (!u) return false;
+  return (Date.now() - u.airDate.getTime()) <= 2 * 365 * 86400000;
+}
+async function attachAiredCounts(items) {
+  await Promise.all(items.filter(needsAiredCount).map(async (it) => {
+    const n = await queueBangumiEpisodes(String(it.id));
+    if (n != null) it.airedCount = n;
+  }));
+}
 function backfillSubLine(card, item, compact) {
   if (!item || item.id == null) return;
   queueBangumiDetail(String(item.id)).then((d) => {
@@ -938,6 +966,19 @@ function backfillSubLine(card, item, compact) {
     if (!n) { n = el("div", { class: "sub" }, line); card.append(n); }
     else n.textContent = line;
   });
+  refreshAiredCount(card, item, compact);
+}
+// 有开播日的卡也要跟真实集数走：拉实际已播集数，日期重算一遍。
+function refreshAiredCount(card, item, compact) {
+  if (!item || item.id == null || !needsAiredCount(item)) return;
+  queueBangumiEpisodes(String(item.id)).then((n) => {
+    if (!card.isConnected || n == null) return;
+    item.airedCount = n;
+    const line = updateLineFor(item, compact);
+    if (!line) return;
+    const el2 = card.querySelector(".sub");
+    if (el2) el2.textContent = line;
+  });
 }
 
 function buildPosterCard(item, compact) {
@@ -947,6 +988,7 @@ function buildPosterCard(item, compact) {
     el("div", { class: "name" }, item.nameCn || item.name || ""),
     sub ? el("div", { class: "sub" }, sub) : null);
   if (!sub) backfillSubLine(card, item, compact);
+  else refreshAiredCount(card, item, compact);
   return card;
 }
 
@@ -965,8 +1007,7 @@ function renderHomeSection(host, key, title, desc, items) {
 }
 
 async function loadHomeSections(host) {
-  if (HOME_SECTIONS.loading) return;
-  if (HOME_SECTIONS.items) {
+  if (HOME_SECTIONS.loading) return;  if (HOME_SECTIONS.items) {
     renderHomeSectionsFrom(HOME_SECTIONS.items, host);
     return;
   }
@@ -1005,6 +1046,49 @@ function renderHomeSectionsFrom(items, host) {
   const fresh = withDate.slice().sort((a, b) => b.u.airDate - a.u.airDate).slice(0, 12).map((x) => x.it);
   renderHomeSection(host, "hot", "最近热播", "近 90 天开播，按 Bangumi 排名排序", hot);
   renderHomeSection(host, "new", "新发", "按开播日期倒序", fresh);
+}
+
+// 新番自动更新（2026-11-08 用户亲口定：有新剧推出要自动出现）：
+// 每次打开分类就现查 /api/bangumi/search，取该地区近 90 天内开播的番，
+// 按热度排，取 12 部横滑展示。新剧一开播（开播日在 90 天内）就自动进
+// 这一节，不用手动加、不用改代码。sort=airDate 后端不生效，所以用
+// airDate 范围过滤 + sort=heat（实测 90 天国漫 19 条、日漫更多）。
+function fmtDateYMD(d) {
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
+  return y + "-" + m + "-" + day;
+}
+const REGION_NEW_CACHE = new Map();
+async function loadRegionNewShows(host, regionKey) {
+  const region = REGIONS.find((r) => r.key === regionKey);
+  if (!region || !region.tags) return;
+  // 先清掉旧的“新番”节（切分类时不留上一个地区的）
+  const old = host.querySelector('[data-home-section="region-new"]');
+  if (old) old.remove();
+  const cacheKey = regionKey + "|" + fmtDateYMD(new Date());
+  if (REGION_NEW_CACHE.has(cacheKey)) {
+    const items = REGION_NEW_CACHE.get(cacheKey);
+    if (items.length) renderHomeSection(host, "region-new", "新番", "近 90 天开播，自动更新", items);
+    return;
+  }
+  try {
+    const today = new Date();
+    const start = new Date(today); start.setDate(today.getDate() - 90);
+    const q = new URLSearchParams();
+    q.set("keyword", "");
+    q.set("offset", "0");
+    q.set("sort", "heat");
+    for (const t of region.tags) q.append("tag", t);
+    q.set("airDate", fmtDateYMD(start) + ".." + fmtDateYMD(today));
+    const data = await fetchJson("/api/bangumi/search?" + q.toString());
+    let items = (data && data.items) || [];
+    // 国漫：少儿不进新番节（跟主榜同一条硬规则）
+    if (regionKey === "cn") items = items.filter((it) => !isKids(it));
+    items = items.slice(0, 12);
+    REGION_NEW_CACHE.set(cacheKey, items);
+    if (items.length) renderHomeSection(host, "region-new", "新番", "近 90 天开播，自动更新", items);
+  } catch (_) {
+    // 静默失败：新番节不显示，不挡主榜
+  }
 }
 
 async function renderTabPopular(container, initialRegion) {
@@ -1056,10 +1140,12 @@ async function renderTabPopular(container, initialRegion) {
     chipsRow.querySelectorAll(".chip").forEach((c) =>
       c.classList.toggle("is-selected", c.getAttribute("data-region") === key));
     titleBtn.querySelector(".text").textContent = titleText();
-    // 分区（最近热播 / 新发）只在“全部”未过滤时显示
+    // 分区：未过滤时显示“最近热播 / 新发”；选了地区时显示该地区的“新番”
+    // （近 90 天开播，自动更新），主榜不受影响。
     const unfiltered = key === "";
-    sectionsHost.style.display = unfiltered ? "" : "none";
+    sectionsHost.style.display = "";
     if (unfiltered) loadHomeSections(sectionsHost);
+    else loadRegionNewShows(sectionsHost, key);
     loadMore(true);
   }
 
@@ -1114,6 +1200,7 @@ async function renderTabPopular(container, initialRegion) {
       POPULAR_STATE.items = [];
       POPULAR_STATE.kidsItems = [];
       POPULAR_STATE.exhausted = false;
+      POPULAR_STATE.searchOffset = 0;
       grid.innerHTML = "";
       kidsHost.innerHTML = "";
       rendered = 0;
@@ -1125,42 +1212,64 @@ async function renderTabPopular(container, initialRegion) {
     try {
       const region = REGIONS.find((r) => r.key === POPULAR_STATE.region);
       if (region && region.tags) {
-        // 地区模式：tag 搜索一次返回；多 tag 取并集去重，再用主导地区标签过滤
-        // 国漫（cn）再并行拉一份置顶热榜（/api/bangumi/{id}，按 id 取）：tag 搜索
-        // 是随机抽样，凡人修仙传/光阴之外经常抽不到，置顶拉取保证它们每次都在。
+        // 地区模式：走 /api/bangumi/search（分页、按热度 sort=heat），不再用
+        // /api/popular?tag=——它一次只回 20 条随机、不能翻页，所以分类只有
+        // 20~40 条、往下翻就没有了（2026-11-08 用户亲口指出“肯定不对”）。
+        // 搜索按 offset 翻页（每页 20 条），滑到底自动续拉，直到某页不足 20 条。
+        // 国漫（cn）首屏再并行拉一份置顶热榜（/api/bangumi/{id}，按 id 取），
+        // 保证凡人修仙传/光阴之外这些真热的每次都在、且排在前面。
         // 单个 id 失败不影响整体（catch 到 null 后过滤掉）。
         const isCn = region.key === "cn";
-        const [lists, hotItems] = await Promise.all([
-          Promise.all(region.tags.map((t) =>
-            fetchJson("/api/popular?tag=" + encodeURIComponent(t)).then((d) => d.items || []).catch(() => []))),
-          isCn
+        const isFirstPage = POPULAR_STATE.items.length === 0 && POPULAR_STATE.kidsItems.length === 0;
+        const q = new URLSearchParams();
+        q.set("keyword", "");
+        q.set("offset", String(POPULAR_STATE.searchOffset || 0));
+        q.set("sort", "heat");
+        for (const t of region.tags) q.append("tag", t);
+        const [searchData, hotItems] = await Promise.all([
+          fetchJson("/api/bangumi/search?" + q.toString()).then((d) => d || {}).catch(() => ({})),
+          (isCn && isFirstPage)
             ? Promise.all(CN_HOT_IDS.map((id) => fetchJson("/api/bangumi/" + id).catch(() => null)))
             : Promise.resolve([]),
         ]);
         if (POPULAR_STATE.epoch !== myEpoch) return;
-        const seen = new Set();
-        const merged = [];
-        for (const it of lists.flat().concat(hotItems || [])) {
-          if (!it || seen.has(it.id)) continue;
-          seen.add(it.id);
-          if (keepForRegion(it, region.key)) merged.push(it);
+        const rawItems = searchData.items || [];
+        const rawCount = typeof searchData.rawCount === "number" ? searchData.rawCount : rawItems.length;
+        POPULAR_STATE.searchOffset = (POPULAR_STATE.searchOffset || 0) + rawCount;
+        // 去重（对已显示的主榜+少儿节），再按主导地区标签过滤
+        const known = new Set(POPULAR_STATE.items.map((x) => x.id).concat(POPULAR_STATE.kidsItems.map((x) => x.id)));
+        const fresh = [];
+        for (const it of (hotItems || []).concat(rawItems)) {
+          if (!it || known.has(it.id)) continue;
+          known.add(it.id);
+          if (keepForRegion(it, region.key)) fresh.push(it);
         }
-        // 地区分类不随机取样：合并后排完再渲染。
-        // 国漫（cn）：少儿分出来单独排一节；主榜按 2026-11-08 新规则排
-        // （2016 年起、按网络热度：置顶热榜在前，其余按 rank；见 sortCnMain）。
-        // 其他地区仍按热度（Bangumi 排名升序，无 rank 的按评分数垫底）排。
+        // 国漫（cn）：少儿分进少儿节；主榜 = 置顶热榜（首屏，固定顺序）+ 其余
+        // 按热度（搜索已按 heat 排，直接追加）；其他地区直接按热度追加。
         if (region.key === "cn") {
           const kids = [], main = [];
-          for (const it of merged) (isKids(it) ? kids : main).push(it);
+          for (const it of fresh) (isKids(it) ? kids : main).push(it);
           kids.sort(compareHot);
-          POPULAR_STATE.items = sortCnMain(main);
-          POPULAR_STATE.kidsItems = kids;
+          POPULAR_STATE.kidsItems = POPULAR_STATE.kidsItems.concat(kids);
+          if (isFirstPage) {
+            const hotOrder = new Map(CN_HOT_IDS.map((id, i) => [id, i]));
+            const hot = [], rest = [];
+            for (const it of main) (hotOrder.has(it.id) ? hot : rest).push(it);
+            hot.sort((a, b) => hotOrder.get(a.id) - hotOrder.get(b.id));
+            POPULAR_STATE.items = hot.concat(rest);
+          } else {
+            POPULAR_STATE.items = POPULAR_STATE.items.concat(main);
+          }
         } else {
-          merged.sort(compareHot);
-          POPULAR_STATE.items = merged;
+          POPULAR_STATE.items = POPULAR_STATE.items.concat(fresh);
           POPULAR_STATE.kidsItems = [];
         }
-        POPULAR_STATE.exhausted = true;
+        // 本页原始条数满 20 才继续翻页；不足 20 说明到底了
+        if (rawCount < 20) POPULAR_STATE.exhausted = true;
+        // 首屏：先把近期番的实际已播集数拉回来再渲染，打开就看到的是
+        // 跟真实更新走的日期，不用等回填慢慢改（2026-11-08 用户亲口定：
+        // “我看的时候，日期就要更新好”）。
+        if (isFirstPage) await attachAiredCounts(POPULAR_STATE.items.concat(POPULAR_STATE.kidsItems));
       } else {
         const url = POPULAR_STATE.tag
           ? "/api/popular?tag=" + encodeURIComponent(POPULAR_STATE.tag)
@@ -1193,8 +1302,9 @@ async function renderTabPopular(container, initialRegion) {
   }
 
   onScrollBottom(grid, () => loadMore(false));
-  // 分区（最近热播 / 新发）只在未过滤的主页显示；过滤时隐藏，不挡网格
+  // 分区：未过滤时显示“最近热播 / 新发”；选了地区时显示该地区的“新番”
   if (!POPULAR_STATE.region && !POPULAR_STATE.tag) loadHomeSections(sectionsHost);
+  else if (POPULAR_STATE.region) loadRegionNewShows(sectionsHost, POPULAR_STATE.region);
   else sectionsHost.style.display = "none";
   await loadMore(true);
 }
