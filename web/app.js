@@ -648,6 +648,12 @@ function updateInfoFor(item) {
     // 日期跟着变（2026-11-08 用户亲口定：更新日期要同步更新）。
     aired = item.airedCount;
     if (total && aired >= total) { finished = true; aired = total; }
+    // 总集数未知时：按最后一集的播出日判断——最后一集已是 26 周以前，
+    // 说明早已播完，算已完结（否则老番只能显示放送年月，没有更新日）。
+    if (!total && aired > 0) {
+      const lastEp = new Date(first); lastEp.setDate(first.getDate() + (aired - 1) * 7);
+      if ((today - lastEp) > 26 * 7 * 86400000) finished = true;
+    }
   } else if (first <= today) {
     const weeks = Math.floor((today - first) / 86400000 / 7);
     aired = weeks + 1;
@@ -662,7 +668,9 @@ function updateLineFor(item, short) {
   if (!u) return "";
   // 总集数未知、且开播已超过 26 周：无法判断是否还在更新，不推测更新日，
   // 但不空白——显示开播年月（用户 2026-11-07 定：分类页卡片也要有更新行）。
-  if (!u.total && (Date.now() - u.airDate.getTime()) > 26 * 7 * 86400000) {
+  // 例外：已拉到实际已播集数时，按真实集数算出“已完结/更新日”，不只显示年月
+  // （2026-11-08 用户亲口定：也要显示）。
+  if (!u.total && item.airedCount == null && (Date.now() - u.airDate.getTime()) > 26 * 7 * 86400000) {
     return u.airDate.getFullYear() + "年" + (u.airDate.getMonth() + 1) + "月";
   }
   const dateStr = (u.next.getMonth() + 1) + "月" + u.next.getDate() + "日";
@@ -940,10 +948,13 @@ function pumpBangumiEpisodes() {
 }
 // 只给“近期开播”（2 年内）的番拉实际已播集数：老番早已完结，
 // 时间推算封顶到总集数就是对的，不用多拉一次。
+// 例外：老番且总集数未知时也要拉一次，否则只能显示放送年月、没有
+// “已完结/更新日”（2026-11-08 用户亲口定：也要显示）。
 function needsAiredCount(item) {
   const u = updateInfoFor(item);
   if (!u) return false;
-  return (Date.now() - u.airDate.getTime()) <= 2 * 365 * 86400000;
+  if ((Date.now() - u.airDate.getTime()) <= 2 * 365 * 86400000) return true;
+  return !u.total;
 }
 async function attachAiredCounts(items) {
   await Promise.all(items.filter(needsAiredCount).map(async (it) => {
@@ -1061,6 +1072,13 @@ const REGION_NEW_CACHE = new Map();
 async function loadRegionNewShows(host, regionKey) {
   const region = REGIONS.find((r) => r.key === regionKey);
   if (!region || !region.tags) return;
+  // 切到地区分类时，先清掉“全部”页留下的“最近热播/新发”两节（那是全站
+  // 热门流，日漫为主），只留本地区的“新番”，不然国漫页顶上会混进日漫
+  // （2026-11-08 实测发现，修掉）。
+  for (const k of ["hot", "new"]) {
+    const s = host.querySelector('[data-home-section="' + k + '"]');
+    if (s) s.remove();
+  }
   // 先清掉旧的“新番”节（切分类时不留上一个地区的）
   const old = host.querySelector('[data-home-section="region-new"]');
   if (old) old.remove();
