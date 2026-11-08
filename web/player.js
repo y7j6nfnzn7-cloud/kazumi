@@ -310,6 +310,24 @@ function cueAt(cues, t) {
   }
   return null;
 }
+// 把原语言叠加 cue 的时间窗口对齐到重叠最多的中文（硬字幕）cue，让双语同频。
+// 2026-11-07 真机反馈：日文（ASR 时间轴）和画面硬字幕不同频——ep03 有 1/3
+// 的行偏差超过 0.5 秒。对不上的行保留原时间；没有中文行对照的集不做对齐。
+function alignCuesToZh(ovlCues, zhCues) {
+  const out = ovlCues.map((c) => ({ start: c.start, end: c.end, text: c.text }));
+  for (const c of out) {
+    let best = null, bestOv = 0;
+    for (const z of zhCues) {
+      const ov = Math.min(c.end, z.end) - Math.max(c.start, z.start);
+      if (ov > bestOv) { bestOv = ov; best = z; }
+    }
+    if (best && (bestOv >= 0.3 || bestOv >= 0.4 * (c.end - c.start))) {
+      c.start = best.start; c.end = best.end;
+    }
+  }
+  out.sort((a, b) => a.start - b.start);
+  return out;
+}
 class DualSubLayer {
   constructor(video, container, opts) {
     this.video = video;
@@ -401,6 +419,8 @@ class DualSubLayer {
       }
       this.ovlCues = parseVtt(ovlText);
       this.zhCues = zhText ? parseVtt(zhText) : [];
+      // 2026-11-07 真机反馈：日文和中文不同频——把叠加行对齐到中文行的时间窗口。
+      if (this.zhCues.length) this.ovlCues = alignCuesToZh(this.ovlCues, this.zhCues);
       this.loaded = this.ovlCues.length > 0;
       if (!this.loaded) this.loadError = "字幕文件为空（" + this.dualLabel + "叠加 " + this.ovlCues.length + " 条）";
     } catch (e) { this.loadError = String(e && e.message || e); }
@@ -706,14 +726,21 @@ function bindTapSeek(video, wrap) {
     else if (relX > 0.66) seekBy(video, wrap, 10);
     else togglePlay();
   };
+  // 2026-11-07 真机反馈：双击快进点不了——手指两次落点常差 60px 以上，
+  // 旧逻辑按像素距离判双击就失效（变成两次单击=暂停）。改按“两次点在
+  // 同一个三分区（左/中/右）”判双击，手指漂移也不怕；窗口放宽到 350ms。
+  const thirdOf = (x) => {
+    const r = wrap.getBoundingClientRect();
+    const rel = (x - r.left) / Math.max(1, r.width);
+    return rel < 0.34 ? 0 : rel > 0.66 ? 2 : 1;
+  };
   const onTap = (x, y) => {
     if (pending) {
-      const dx = x - pendingX, dy = y - pendingY;
       clearTimeout(pending); pending = null;
-      if (Math.abs(dx) < 60 && Math.abs(dy) < 60) { doDouble(x, y); return; }
+      if (thirdOf(x) === thirdOf(pendingX)) { doDouble(x, y); return; }
     }
     pendingX = x; pendingY = y;
-    pending = setTimeout(() => { pending = null; togglePlay(); }, 280);
+    pending = setTimeout(() => { pending = null; togglePlay(); }, 350);
   };
   let lastTouchEnd = 0;
   zone.addEventListener("touchend", (ev) => {

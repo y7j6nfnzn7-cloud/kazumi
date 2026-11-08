@@ -1032,11 +1032,13 @@ body.no-scroll { overflow: hidden; }
 .player-wrap .player-back { position: absolute; top: max(env(safe-area-inset-top), 8px); left: 8px; z-index: 4; }
 .danmaku-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .danmaku-canvas.is-hidden { display: none; }
-/* 双语字幕叠加层：日文行在画面中文字幕（硬字幕）上方，避免重影；中文行预留给无硬字幕的源 */
-.dual-sub { position: absolute; left: 0; right: 0; bottom: 13%; text-align: center; pointer-events: none; z-index: 5; padding: 0 8px; }
+/* 双语字幕叠加层：日文行放画面顶部，彻底避开底部中文硬字幕。
+   2026-11-07 真机反馈：横屏时 bottom:8% 正好压在画面底部硬字幕上，
+   日文和中文叠在一起。放顶部后和硬字幕永远不重叠（全局，所有番所有集）。 */
+.dual-sub { position: absolute; left: 0; right: 0; top: 64px; text-align: center; pointer-events: none; z-index: 5; padding: 0 8px; }
 .dual-sub-ja { display: inline-block; font-size: 17px; line-height: 1.4; color: #ffe9a8; background: rgba(0,0,0,0.55); border-radius: 6px; padding: 2px 8px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); }
 .dual-sub-zh { display: inline-block; font-size: 19px; line-height: 1.4; color: #fff; background: rgba(0,0,0,0.55); border-radius: 6px; padding: 2px 8px; margin-top: 4px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); }
-.player-wrap.is-rotated .dual-sub { bottom: 8%; }
+.player-wrap.is-rotated .dual-sub { top: 64px; }
 .player-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 /* 弹幕源 sheet：三段进度条（当前 primary / 已完成 primaryContainer / 未到 outlineVariant） */
 .step-bar { display: flex; gap: 6px; margin: 0 0 16px; }
