@@ -1035,11 +1035,17 @@ body.no-scroll { overflow: hidden; }
 .danmaku-canvas.is-hidden { display: none; }
 /* 双语字幕叠加层：2026-11-07 用户亲口定——日文和中文上下并列成一对，
    日文在中文硬字幕上方、中间留空隙，字体用细的。放画面底部（硬字幕正上方），
-   不用跑到顶部；全局生效，所有番所有集。 */
-.dual-sub { position: absolute; left: 0; right: 0; bottom: 48px; text-align: center; pointer-events: none; z-index: 5; padding: 0 8px; }
+   不用跑到顶部；全局生效，所有番所有集。bottom 用百分比（相对播放器高度），
+   不用固定 px：不同源的硬字幕高低不一样（鬼灭的硬字幕比黑暗召唤师高），
+   固定 48px 在鬼灭上会跑到中文下面去；22% 在两个源、竖屏横屏下都盖得住。 */
+.dual-sub { position: absolute; left: 0; right: 0; bottom: 22%; text-align: center; pointer-events: none; z-index: 5; padding: 0 8px; }
 .dual-sub-ja { display: inline-block; font-size: 16px; font-weight: 300; line-height: 1.4; color: #ffe9a8; background: rgba(0,0,0,0.35); border-radius: 6px; padding: 2px 8px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); }
 .dual-sub-zh { display: inline-block; font-size: 19px; font-weight: 300; line-height: 1.4; color: #fff; background: rgba(0,0,0,0.35); border-radius: 6px; padding: 2px 8px; margin-top: 4px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); }
-.player-wrap.is-rotated .dual-sub { bottom: 48px; }
+.player-wrap.is-rotated .dual-sub { bottom: 22%; }
+/* 横屏旋转态：点按层盖满整个播放器。竖屏时上下留空是给原生控制条和返回键的，
+   但旋转后那两条空在屏幕左右两边、不是控制条的位置，反而成了点按死区
+   （横屏双击快进点不到，2026-11-07 桌面实测：横屏双击只切播放/暂停）。 */
+.player-wrap.is-rotated .tap-zone { top: 0; bottom: 0; }
 .player-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 /* 弹幕源 sheet：三段进度条（当前 primary / 已完成 primaryContainer / 未到 outlineVariant） */
 .step-bar { display: flex; gap: 6px; margin: 0 0 16px; }

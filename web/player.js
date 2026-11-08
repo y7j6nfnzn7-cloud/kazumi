@@ -720,24 +720,41 @@ function bindTapSeek(video, wrap) {
     else video.pause();
   };
   const doDouble = (x, y) => {
-    const r = wrap.getBoundingClientRect();
-    const relX = (x - r.left) / Math.max(1, r.width);
+    const relX = tapRel(x, y).x;
     if (relX < 0.34) seekBy(video, wrap, -10);
     else if (relX > 0.66) seekBy(video, wrap, 10);
     else togglePlay();
   };
+  // 点按坐标换算到播放器本地坐标（0~1）。旋转 90° 时 getBoundingClientRect
+  // 是旋转后的外接矩形，直接用 clientX 算左右会错（横屏下双击快进失效，
+  // 2026-11-07 桌面实测：横屏双击只切播放/暂停，竖屏对照 +10 秒正常）。
+  // 用 transform 矩阵的线性部分（只取旋转/缩放，不管位移）把屏幕点换算回
+  // 本地坐标，旋转/不旋转都正确；矩阵不可用时退回原来的简易算法。
+  const tapRel = (x, y) => {
+    const r = wrap.getBoundingClientRect();
+    const w = wrap.offsetWidth || r.width, h = wrap.offsetHeight || r.height;
+    const tf = getComputedStyle(wrap).transform;
+    if (tf && tf !== "none" && typeof DOMMatrixReadOnly !== "undefined" && typeof DOMPoint !== "undefined") {
+      try {
+        const m = new DOMMatrixReadOnly(tf);
+        const rot = new DOMMatrix([m.a, m.b, m.c, m.d, 0, 0]);
+        const p = new DOMPoint(x - (r.left + r.width / 2), y - (r.top + r.height / 2)).matrixTransform(rot.inverse());
+        return { x: (p.x + w / 2) / w, y: (p.y + h / 2) / h };
+      } catch (_) { /* 掉到下面的简易算法 */ }
+    }
+    return { x: (x - r.left) / Math.max(1, r.width), y: (y - r.top) / Math.max(1, r.height) };
+  };
   // 2026-11-07 真机反馈：双击快进点不了——手指两次落点常差 60px 以上，
   // 旧逻辑按像素距离判双击就失效（变成两次单击=暂停）。改按“两次点在
   // 同一个三分区（左/中/右）”判双击，手指漂移也不怕；窗口放宽到 350ms。
-  const thirdOf = (x) => {
-    const r = wrap.getBoundingClientRect();
-    const rel = (x - r.left) / Math.max(1, r.width);
-    return rel < 0.34 ? 0 : rel > 0.66 ? 2 : 1;
+  const thirdOf = (x, y) => {
+    const relX = tapRel(x, y).x;
+    return relX < 0.34 ? 0 : relX > 0.66 ? 2 : 1;
   };
   const onTap = (x, y) => {
     if (pending) {
       clearTimeout(pending); pending = null;
-      if (thirdOf(x) === thirdOf(pendingX)) { doDouble(x, y); return; }
+      if (thirdOf(x, y) === thirdOf(pendingX, pendingY)) { doDouble(x, y); return; }
     }
     pendingX = x; pendingY = y;
     pending = setTimeout(() => { pending = null; togglePlay(); }, 350);
