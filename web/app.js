@@ -966,7 +966,9 @@ function needsAiredCount(item) {
 async function attachAiredCounts(items) {
   await Promise.all(items.filter(needsAiredCount).map(async (it) => {
     const n = await queueBangumiEpisodes(String(it.id));
-    if (n != null) it.airedCount = n;
+    // 0 集 = 分集接口没数据（剧场版/特别篇常这样），不当成“已播 0 集”，
+    // 否则卡片会显示“共0集”；不设 airedCount，走日期兜底或“暂无更新信息”。
+    if (n != null && n > 0) it.airedCount = n;
   }));
 }
 function backfillSubLine(card, item, compact) {
@@ -990,7 +992,7 @@ function backfillSubLine(card, item, compact) {
 function refreshAiredCount(card, item, compact) {
   if (!item || item.id == null || !needsAiredCount(item)) return;
   queueBangumiEpisodes(String(item.id)).then((n) => {
-    if (!card.isConnected || n == null) return;
+    if (!card.isConnected || n == null || n <= 0) return;
     item.airedCount = n;
     const line = updateLineFor(item, compact);
     if (!line) return;
