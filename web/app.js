@@ -634,7 +634,7 @@ function updateInfoFor(item) {
   // new Date(0,-1,0) 会算成 1899 年 11 月，卡片上就冒出 "1899年11月"
   // （2026-11-08 实测：呼唤少女等 17 条老片中招）。
   if (air.y < 1900 || air.mo < 1 || air.mo > 12 || air.d < 1 || air.d > 31) return null;
-  let total = parseInfoEps(item.info); // let：已播超总集数时总集数不可信，要置 null
+  const total = parseInfoEps(item.info);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const first = new Date(air.y, air.mo - 1, air.d); first.setHours(0, 0, 0, 0);
   if (isNaN(first)) return null;
@@ -645,52 +645,45 @@ function updateInfoFor(item) {
   next.setDate(today.getDate() + delta);
   // 未开播：下次更新就是开播日本身，不是这周的同一星期
   if (first > today) next.setTime(first.getTime());
-  let aired = null, finished = false, unreliableDate = false;
+  let aired = null, finished = false;
   if (item.airedCount != null) {
     // 实际已播集数（从分集接口数出来的）：跟真实更新走，不按时间推算。
     // 停播/延期时集数不涨，日期就不会凭空往前跑；新一集出了集数涨了，
     // 日期跟着变（2026-11-08 用户亲口定：更新日期要同步更新）。
     aired = item.airedCount;
-    // 已播集数比 info 总集数多出 5 集以上：info 总集数是旧的、不可信
-    // （例：罗小黑战记 info 写 28 话，实际已播 35 集，还在不定期更新）。
-    // 不按旧总集数判完结，也不按周更推算日期（不定期更新的周更推算全错），
-    // 只显示集数。只多 1–4 集一般是特别篇/番外，不影响周更推算。
-    if (total && aired - total >= 5) { total = null; unreliableDate = true; }
-    else if (total && aired >= total) { finished = true; aired = total; }
+    // 分集接口会把未播的未来集数也列出来（例：一斩苍穹 2026-07-28 开播、
+    // 周更，到 11 月 8 日只播了约 15 集，但接口已列出全部 26 集）。
+    // 直接拿它当已播集数会把还在更新的番误判成已完结。开播不到 1 年的番，
+    // 已播集数不可能超过开播以来的周数 + 2（周更上限），超了就按周数封顶。
+    // 开播超过 1 年的不封顶（可能是日更长番，周数封顶会低估）。
+    const daysSinceFirst = Math.floor((today - first) / 86400000);
+    if (daysSinceFirst <= 365) {
+      const weekCap = Math.floor(daysSinceFirst / 7) + 2;
+      if (aired > weekCap) aired = weekCap;
+    }
+    if (total && aired >= total) { finished = true; aired = total; }
     // 总集数未知时：按最后一集的播出日判断——最后一集已是 26 周以前，
     // 说明早已播完，算已完结（否则老番只能显示放送年月，没有更新日）。
-    if (!total && !unreliableDate && aired > 0) {
-      const le = new Date(first); le.setDate(first.getDate() + (aired - 1) * 7);
-      if ((today - le) > 26 * 7 * 86400000) finished = true;
+    if (!total && aired > 0) {
+      const lastEp = new Date(first); lastEp.setDate(first.getDate() + (aired - 1) * 7);
+      if ((today - lastEp) > 26 * 7 * 86400000) finished = true;
     }
   } else if (first <= today) {
     const weeks = Math.floor((today - first) / 86400000 / 7);
     aired = weeks + 1;
     if (total && aired >= total) { finished = true; aired = total; }
   } else aired = 0; // 未开播
-  // 已完结：最后一集的播出日就是最后更新日，必须显示出来当更新日期，
-  // 不能只写“已完结”（2026-11-08 用户指出：更新日期怎么是“已完结”，
-  // 那么多卡片都只有“已完结”没有日期）。按周更推算：开播日 + (集数-1) 周。
-  // 推算出的日期跑到未来，说明不是周更（例：炼气十万年日更，420 集按周更
-  // 会算到 2031 年），周更推算不可信，不显示这个日期，退回“已完结”。
-  let lastEp = null;
-  if (finished && aired > 0) {
-    const le = new Date(first); le.setDate(first.getDate() + (aired - 1) * 7);
-    if (le <= today) lastEp = le;
-  }
-  return { total, airDate: first, weekday: wd, next, isToday: delta === 0, aired, finished, lastEp, unreliableDate };
+  return { total, airDate: first, weekday: wd, next, isToday: delta === 0, aired, finished };
 }
-// 例："11月8日 周日更新 · 共12集 · 已播约5集" / "2021年8月4日完结 · 共52集" / "11月8日 周日开播"
-// 已完结的也要给最后更新日（最后一集播出日），不能只写“已完结”。
+// 例："11月8日 周日更新 · 共12集 · 已播约5集" / "已完结 · 共12集" / "11月8日 周日开播"
+// 已完结就是“已完结”，不写日期（2026-11-08 用户亲口定）；还在更新的
+// 显示周几和月日（“11月8日 周日更新”，不带年份，全站统一这一种格式）。
 // short=true 时只返回前半句（日期+星期+状态），横滑小卡片用，保证一行内完整显示、不被省略号截断
 function updateLineFor(item, short) {
   const u = updateInfoFor(item);
   // 没有有效开播日（老片 Bangumi 缺日期）：
   // 不显示假日期；拉到集数就显示“共N集”，没拉到就空着、等集数回来再补。
   if (!u) return item.airedCount != null ? "共" + item.airedCount + "集" : "";
-  // info 总集数是旧的、实际集数已超过它（不定期更新的老番）：日期推算
-  // 不可信，不编日期、不写“已完结”，只显示真实集数。
-  if (u.unreliableDate) return "共" + u.aired + "集";
   // 总集数未知、且开播已超过 26 周：无法判断是否还在更新，不推测更新日，
   // 但不空白——显示开播年月（用户 2026-11-07 定：分类页卡片也要有更新行）。
   // 例外：已拉到实际已播集数时，按真实集数算出“已完结/更新日”，不只显示年月
@@ -701,13 +694,7 @@ function updateLineFor(item, short) {
   const dateStr = (u.next.getMonth() + 1) + "月" + u.next.getDate() + "日";
   const wdStr = "周" + WEEKDAY_CN[u.weekday];
   let head;
-  if (u.finished) {
-    // 已完结显示最后更新日（最后一集播出日），不只写“已完结”：
-    // 2026-11-08 用户指出更新日期不能是“已完结”。算不出就退回“已完结”。
-    head = u.lastEp
-      ? u.lastEp.getFullYear() + "年" + (u.lastEp.getMonth() + 1) + "月" + u.lastEp.getDate() + "日完结"
-      : "已完结";
-  }
+  if (u.finished) head = "已完结";
   else if (u.aired === 0) head = dateStr + " " + wdStr + "开播";
   else if (u.isToday) head = "今天" + wdStr + "更新";
   else head = dateStr + " " + wdStr + "更新";
@@ -898,87 +885,146 @@ function isKids(item) {
 // （Bangumi rank 3576 严重低估，真实月播约 2 亿）排第 25。
 // 注意：Bangumi rank 对国漫不准，不能用 rank 定热度，置顶用名单定。
 const CN_HOT_IDS = [
-  153197, // 斗破苍穹 (2017)
-  199425, // 斗罗大陆 (2018)
-  223147, // 凡人修仙传 (2020)
-  244239, // 吞噬星空 (2020)
-  345802, // 仙逆 (2023)
-  458926, // 光阴之外 (2025)
-  345803, // 斗罗大陆2 绝世唐门 (2023)
-  345825, // 剑来 (2024)
-  244008, // 刺客伍六七 (2018)
-  204863, // 雾山五行 (2016)
-  175457, // 一人之下 (2016)
-  156591, // 镇魂街 (2016)
-  269537, // 灵笼 (2019)
-  289101, // 天官赐福 (2020)
-  199423, // 魔道祖师 前尘篇 (2018)
-  153196, // 全职高手 (2017)
-  456159, // 牧神记 (2024)
-  223148, // 星辰变 (2018)
-  224641, // 武动乾坤 (2019)
-  291213, // 大王饶命 (2021)
-  244224, // 完美世界 (2021)
-  366897, // 神印王座 (2022)
-  403607, // 沧元图 (2023)
-  345768, // 遮天 (2023)
-  244226, // 一念永恒 (2020)
-  109677, // 画江湖之不良人 (2014)
-  240738, // 少年歌行 (2018)
-  312298, // 诛仙 (2022)
-  137937, // 狐妖小红娘 (2015)
-  183957, // 大理寺日志 (2020)
-  405212, // 凸变英雄X (2025)
-  358660, // 中国奇谭 (2023)
-  320224, // 时光代理人 (2021)
-  13603, // 罗小黑战记 (2011)
-  440171, // 长生界 (2024)
-  140217, // 择天记 (2015)
-  176509, // 武庚纪 (2016)
-  127448, // 天行九歌 (2016)
-  380473, // 暗河传 (2023)
-  380466, // 少年白马醉春风 (2022)
-  // 第 41–78 位（2026-11-08 漏网排查补进）：热度流只有前 1000 条，
-  // Bangumi 热度 1000 名开外的热门翻不到，只能靠置顶。按云合/灯塔/骨朵
-  // 真实播放量排；23 部在热度流前 1000 里根本没有，15 部埋在 101–721 名。
-  420069, // 炼气十万年 (2023)
-  345824, // 诡秘之主 (2025)
-  345826, // 元尊 (2024)
-  245719, // 雪鹰领主 (2018)
-  320241, // 永生 (2022)
-  214790, // 妖神记 (2017)
-  345827, // 修罗武神 (2023)
-  398799, // 斩神之凡尘神域 (2024)
-  516423, // 云深不知梦 (2025)
-  311673, // 镖人 (2023)
-  190111, // 全职法师 (2016)
-  379513, // 神墓 (2022)
-  493777, // 深空彼岸 (2026)
-  271256, // 灵剑尊 (2019)
-  240962, // 万界仙踪 (2018)
-  395658, // 大主宰 (2023)
-  136150, // 莽荒纪 (2015)
-  282743, // 独步逍遥 (2020)
-  286354, // 武神主宰 (2020)
-  271257, // 万界神主 (2019)
-  358571, // 君有云 (2022)
-  286339, // 眷思量 (2021)
-  306019, // 紫川 (2021)
-  395223, // 仙剑奇侠传三 (2025)
-  504547, // 灵武大陆 (2024)
-  340263, // 成何体统 (2024)
-  269552, // 天宝伏妖录 (2020)
-  244232, // 雄兵连 (2019)
-  214741, // 西行纪 (2018)
-  358668, // 赘婿 (2023)
-  311708, // 搜玄录之宸灵纪 (2021)
-  345892, // 镜·双城 (2021)
-  244231, // 山河剑心 (2021)
-  213723, // 天谕 (2017)
-  391849, // 神澜奇域无双珠 (2022)
-  395657, // 逆天邪神 (2023)
-  403739, // 修仙者大战超能力 (2026)
-  458985, // 史上最强炼体老祖 (2026)
+  // 2026-11-09 按推荐重排（用户亲定）：按海内外评定+观看收藏人数，
+  // 仙逆升第 1、斩神进前 10、剑来第 5、完美世界第 7、武动乾坤第 9；
+  // 光阴之外跌出前 20、一人之下/魔道祖师冷却。一季二季分开列：每部 S1 紧后
+  // 跟最新季（B 表 55 部已核验是不同内容）；新补龙族、茶啊二中第6季。
+  // 共 135 部：原 78 + 最新季 55 + 新补 2。
+  345802, // #1 仙逆 (2023)
+  630676, // #2 仙逆 年番3
+  153197, // #3 斗破苍穹 (2017)
+  562145, // #4 斗破苍穹 年番4
+  223147, // #5 凡人修仙传 (2020)
+  607915, // #6 凡人修仙传 第五季
+  199425, // #7 斗罗大陆 (2018)
+  407787, // #8 斗罗大陆 第六季
+  345825, // #9 剑来 (2024)
+  520300, // #10 剑来 第二季
+  345803, // #11 斗罗大陆2 绝世唐门 (2023)
+  244224, // #12 完美世界 (2021)
+  700676, // #13 完美世界 第七季
+  244239, // #14 吞噬星空 (2020)
+  424557, // #15 吞噬星空 宇宙篇
+  224641, // #16 武动乾坤 (2019)
+  398799, // #17 斩神之凡尘神域 (2024)
+  520299, // #18 斩神之凡尘神域 第2季
+  403607, // #19 沧元图 (2023)
+  575244, // #20 沧元图 第三季
+  366897, // #21 神印王座 (2022)
+  395289, // #22 神印王座 第二季
+  13603, // #23 罗小黑战记 (2011)
+  345768, // #24 遮天 (2023)
+  637591, // #25 遮天 第四季
+  312298, // #26 诛仙 (2022)
+  577143, // #27 诛仙 最终季
+  291213, // #28 大王饶命 (2021)
+  507820, // #29 大王饶命 第三季
+  312297, // #30 龙族 (2022)
+  456159, // #31 牧神记 (2024)
+  712000, // #32 牧神记5
+  244226, // #33 一念永恒 (2020)
+  572768, // #34 一念永恒 完结季
+  613039, // #35 茶啊二中 第6季 (2026)
+  175457, // #36 一人之下 (2016)
+  507819, // #37 一人之下 第六季
+  458926, // #38 光阴之外 (2025)
+  646611, // #39 光阴之外 第二季
+  199423, // #40 魔道祖师 前尘篇 (2018)
+  289944, // #41 魔道祖师 完结篇
+  244008, // #42 刺客伍六七 (2018)
+  491930, // #43 伍六七之记忆碎片
+  305515, // #44 雾山五行 (2020，正片主条目；原 204863 是 2016 年 1 集试播短片，2026-11-08 改版排查已换）
+  156591, // #45 镇魂街 (2016)
+  456601, // #46 镇魂街 第四季
+  269537, // #47 灵笼 (2019)
+  336268, // #48 灵笼 第二季
+  289101, // #49 天官赐福 (2020)
+  289102, // #50 天官赐福 第二季
+  153196, // #51 全职高手 (2017)
+  345806, // #52 全职高手 第三季
+  223148, // #53 星辰变 (2018)
+  576731, // #54 星辰变 最终季
+  109677, // #55 画江湖之不良人 (2014)
+  435075, // #56 画江湖之不良人 第七季
+  240738, // #57 少年歌行 (2018)
+  458978, // #58 少年歌行 血染天启篇
+  137937, // #59 狐妖小红娘 (2015)
+  506836, // #60 狐妖小红娘13 黄风岭篇
+  183957, // #61 大理寺日志 (2020)
+  449346, // #62 大理寺日志 第三季
+  405212, // #63 凸变英雄X (2025)
+  358660, // #64 中国奇谭 (2023)
+  423036, // #65 中国奇谭 第二季
+  320224, // #66 时光代理人 (2021)
+  555710, // #67 时光代理人 第三季
+  440171, // #68 长生界 (2024)
+  526975, // #69 择天记 (2026，新版 26 话；原 140217 是 2015 年旧版 13 话，2026-11-08 改版排查已换）
+  176509, // #70 武庚纪 (2016)
+  413616, // #71 武庚纪 第四季 下篇
+  127448, // #72 天行九歌 (2016)
+  380473, // #73 暗河传 (2023)
+  458981, // #74 暗河传 下部·九霄龙吟篇
+  380466, // #75 少年白马醉春风 (2022)
+  449570, // #76 少年白马醉春风 第二季
+  420069, // #77 炼气十万年 (2023)
+  345824, // #78 诡秘之主 (2025)
+  345826, // #79 元尊 (2024)
+  245719, // #80 雪鹰领主 (2018)
+  343184, // #81 雪鹰领主 第三季
+  320241, // #82 永生 (2022)
+  487853, // #83 永生 第五季
+  214790, // #84 妖神记 (2017)
+  641326, // #85 妖神记 第十季
+  345827, // #86 修罗武神 (2023)
+  542324, // #87 修罗武神 第2季
+  516423, // #88 云深不知梦 (2025)
+  311673, // #89 镖人 (2023)
+  449343, // #90 镖人 第2季
+  190111, // #91 全职法师 (2016)
+  507822, // #92 全职法师 第七季
+  379513, // #93 神墓 (2022)
+  458937, // #94 神墓 年番
+  493777, // #95 深空彼岸 (2026)
+  271256, // #96 灵剑尊 (2019)
+  464007, // #97 灵剑尊 第五季
+  240962, // #98 万界仙踪 (2018)
+  641469, // #99 万界仙踪 第八季
+  395658, // #100 大主宰 (2023)
+  136150, // #101 莽荒纪 (2015)
+  282743, // #102 独步逍遥 (2020)
+  286354, // #103 武神主宰 (2020)
+  708411, // #104 武神主宰 姬州篇
+  271257, // #105 万界神主 (2019)
+  466770, // #106 万界神主 第五季
+  358571, // #107 君有云 (2022)
+  402358, // #108 君有云 第二季
+  286339, // #109 眷思量 (2021)
+  345810, // #110 眷思量 第二季
+  306019, // #111 紫川 (2021)
+  449338, // #112 紫川 第二季
+  395223, // #113 仙剑奇侠传三 (2025)
+  504547, // #114 灵武大陆 (2024)
+  340263, // #115 成何体统 (2024)
+  521431, // #116 成何体统 第二季
+  269552, // #117 天宝伏妖录 (2020)
+  320217, // #118 天宝伏妖录 第二季
+  244232, // #119 雄兵连 (2019)
+  312370, // #120 雄兵连3 雷霆万钧
+  214741, // #121 西行纪 (2018)
+  395284, // #122 西行纪 年番
+  358668, // #123 赘婿 (2023)
+  456166, // #124 赘婿 龙蛇篇
+  311708, // #125 搜玄录之宸灵纪 (2021)
+  345892, // #126 镜·双城 (2021)
+  244231, // #127 山河剑心 (2021)
+  213723, // #128 天谕 (2017)
+  226632, // #129 天谕 苍古之绊
+  391849, // #130 神澜奇域无双珠 (2022)
+  429921, // #131 神澜奇域无双珠 天魔篇
+  395657, // #132 逆天邪神 (2023)
+  487522, // #133 逆天邪神 年番
+  403739, // #134 修仙者大战超能力 (2026)
+  458985, // #135 史上最强炼体老祖 (2026)
 ];
 // （sortCnMain 已移除：地区分类改走 /api/bangumi/search 分页取数，不再是
 //  一次性 tag 随机样本 + 本地分桶排序。见 loadMore 地区分支。）
@@ -1116,7 +1162,45 @@ function renderHomeSection(host, key, title, desc, items) {
   host.append(sec);
 }
 
+// 最新发布（2026-11-08 用户亲口定：分类个最新发布；108 天太久了，改 5 天）：
+// 首页专属一节，近 5 天内开播的番，日漫 + 国漫都要有，不要动态漫画。
+// 跨地区（不按 tag 过滤），按开播日倒序，取 12 部。有新剧开播就自动出现，
+// 不用手动加。动态漫按片名含“动态漫/动态漫画”过滤掉。
+function isMotionComic(it) {
+  const nm = (it && (it.nameCn || it.name)) || "";
+  return nm.indexOf("动态漫") >= 0 || nm.indexOf("动态漫画") >= 0;
+}
+const LATEST_CACHE = new Map();
+async function loadLatestReleases(host) {
+  const cacheKey = "latest|" + fmtDateYMD(new Date());
+  if (LATEST_CACHE.has(cacheKey)) {
+    const items = LATEST_CACHE.get(cacheKey);
+    if (items.length) renderHomeSection(host, "latest", "最新发布", "近 5 天发布 · 日漫 + 国漫", items);
+    return;
+  }
+  try {
+    const today = new Date();
+    const start = new Date(today); start.setDate(today.getDate() - 5);
+    const q = new URLSearchParams();
+    q.set("keyword", "");
+    q.set("offset", "0");
+    q.set("sort", "heat");
+    q.set("airDate", fmtDateYMD(start) + ".." + fmtDateYMD(today));
+    const data = await fetchJson("/api/bangumi/search?" + q.toString());
+    let items = (data && data.items) || [];
+    items = items.filter((it) => it && it.airDate && !isMotionComic(it));
+    // 后端 sort=airDate 不生效，自己按开播日倒序
+    items.sort((a, b) => String(b.airDate || "") < String(a.airDate || "") ? -1 : String(b.airDate || "") > String(a.airDate || "") ? 1 : 0);
+    items = items.slice(0, 12);
+    LATEST_CACHE.set(cacheKey, items);
+    if (items.length) renderHomeSection(host, "latest", "最新发布", "近 5 天发布 · 日漫 + 国漫", items);
+  } catch (_) {
+    // 静默失败：最新发布节不显示，不挡主页
+  }
+}
+
 async function loadHomeSections(host) {
+  loadLatestReleases(host);
   if (HOME_SECTIONS.loading) return;  if (HOME_SECTIONS.items) {
     renderHomeSectionsFrom(HOME_SECTIONS.items, host);
     return;
@@ -1134,6 +1218,8 @@ async function loadHomeSections(host) {
     for (const p of pages) for (const it of (p && p.items) || []) {
       if (!it || seen.has(it.id)) continue;
       seen.add(it.id);
+      // 动态漫画不进播放器（2026-11-08 用户亲口定）
+      if (isMotionComic(it)) continue;
       items.push(it);
     }
     HOME_SECTIONS.items = items;
@@ -1173,10 +1259,10 @@ const REGION_NEW_CACHE = new Map();
 async function loadRegionNewShows(host, regionKey) {
   const region = REGIONS.find((r) => r.key === regionKey);
   if (!region || !region.tags) return;
-  // 切到地区分类时，先清掉“全部”页留下的“最近热播/新发”两节（那是全站
+  // 切到地区分类时，先清掉“全部”页留下的“最近热播/新发/最新发布”三节（那是全站
   // 热门流，日漫为主），只留本地区的“新番”，不然国漫页顶上会混进日漫
   // （2026-11-08 实测发现，修掉）。
-  for (const k of ["hot", "new"]) {
+  for (const k of ["hot", "new", "latest"]) {
     const s = host.querySelector('[data-home-section="' + k + '"]');
     if (s) s.remove();
   }
@@ -1200,6 +1286,8 @@ async function loadRegionNewShows(host, regionKey) {
     q.set("airDate", fmtDateYMD(start) + ".." + fmtDateYMD(today));
     const data = await fetchJson("/api/bangumi/search?" + q.toString());
     let items = (data && data.items) || [];
+    // 动态漫画不进播放器（2026-11-08 用户亲口定）：所有地区的新番节都去掉动态漫
+    items = items.filter((it) => !isMotionComic(it));
     // 国漫：少儿不进新番节（跟主榜同一条硬规则）
     if (regionKey === "cn") items = items.filter((it) => !isKids(it));
     // 新番按开播日倒序（最新开播的排前面），不按 Bangumi 热度：
@@ -1366,6 +1454,8 @@ async function renderTabPopular(container, initialRegion) {
         for (const it of (hotItems || []).concat(rawItems)) {
           if (!it || known.has(it.id)) continue;
           known.add(it.id);
+          // 动态漫画不进播放器（2026-11-08 用户亲口定）
+          if (isMotionComic(it)) continue;
           if (keepForRegion(it, region.key)) fresh.push(it);
         }
         // 国漫（cn）：少儿分进少儿节；主榜 = 置顶热榜（首屏，固定顺序）+ 其余
@@ -1400,7 +1490,8 @@ async function renderTabPopular(container, initialRegion) {
           : "/api/popular?offset=" + POPULAR_STATE.items.length;
         const data = await fetchJson(url);
         if (POPULAR_STATE.epoch !== myEpoch) return;
-        const items = data.items || [];
+        // 动态漫画不进播放器（2026-11-08 用户亲口定）
+        const items = (data.items || []).filter((it) => !isMotionComic(it));
         POPULAR_STATE.items = POPULAR_STATE.items.concat(items);
         // tag 模式后端是一次性返回（rank 随机），不再续翻
         if (POPULAR_STATE.tag || !items.length) POPULAR_STATE.exhausted = true;
@@ -2001,7 +2092,8 @@ const SEARCH_STATE = {
   abandonedIds: new Set(),
 };
 function filterSearchResults(items) {
-  let arr = items;
+  // 动态漫画不进播放器（2026-11-08 用户亲口定）：所有搜索结果先去掉动态漫
+  let arr = items.filter((it) => !isMotionComic(it));
   if (SEARCH_STATE.hideWatched) arr = arr.filter((it) => !SEARCH_STATE.watchedIds.has(it.id));
   if (SEARCH_STATE.hideAbandoned) arr = arr.filter((it) => !SEARCH_STATE.abandonedIds.has(it.id));
   return arr;
