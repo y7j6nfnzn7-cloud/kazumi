@@ -669,6 +669,9 @@ async function attachStream(video, data, onError) {
     });
     activeHls = hls;
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      // 只认当前还在用的实例：切集后旧实例的回调晚到，不能再去碰新页面的
+      // 画质下拉（旧闭包 + 新 DOM = 引用过期那类问题，2026-11-09 复测）。
+      if (activeHls !== hls) return;
       activeHlsLevels = (hls.levels || []).slice();
       try { if (typeof window.__onHlsLevels === "function") window.__onHlsLevels(activeHlsLevels); } catch (_) {}
     });
@@ -879,6 +882,17 @@ function bindTapSeek(video, wrap) {
     if (!main || isLocked() || main.classList.contains("controls-hidden")) return;
     armAutoHide();
   };
+  // 桌面端回归（2026-11-09 线上复测）：1.5 秒只认 pointerdown/click 才续命，
+  // 鼠标从锁图标（视频右上角）移到视频下方的控制条要 1.5 秒以上，控制条
+  // 在半路就藏了，暂停点不中。鼠标移动本身就是“有操作”：在视频区/控制条
+  // 上移动就重新计时；控制条藏着时鼠标一移进来就重新出现（一碰就回）。
+  // 只认鼠标：触屏滑动也会触发 pointermove，不能让它把控制条顶出来。
+  const pokeFromMouseMove = (ev) => {
+    if (ev && ev.pointerType && ev.pointerType !== "mouse") return;
+    if (!main || isLocked()) return;
+    if (main.classList.contains("controls-hidden")) showControls();
+    else pokeControls();
+  };
   video.addEventListener("play", armAutoHide);
   video.addEventListener("pause", () => {
     clearTimeout(hideTimer); hideTimer = null;
@@ -890,6 +904,17 @@ function bindTapSeek(video, wrap) {
   if (controlsEl) {
     controlsEl.addEventListener("pointerdown", pokeControls);
     controlsEl.addEventListener("click", pokeControls);
+    controlsEl.addEventListener("pointermove", pokeFromMouseMove);
+    controlsEl.addEventListener("mouseenter", pokeControls);
+  }
+  // 进度条行也是控制条的一部分：点它、拖它、鼠标在它上面移动都算操作，
+  // 1.5 秒重新计时（复测回归：只绑了 .player-controls，拖进度条不续命）。
+  const seekRowEl = main ? main.querySelector(".player-seek-row") : null;
+  if (seekRowEl) {
+    seekRowEl.addEventListener("pointerdown", pokeControls);
+    seekRowEl.addEventListener("click", pokeControls);
+    seekRowEl.addEventListener("input", pokeControls);
+    seekRowEl.addEventListener("pointermove", pokeFromMouseMove);
   }
   // 锁开关在 bindTapSeek 之后才创建，直接监听不到；只看 ui-locked 的变化，
   // 不看 controls-hidden（否则显隐切换会自己触发自己、来回乒乓）。
@@ -903,12 +928,15 @@ function bindTapSeek(video, wrap) {
       else showControls();
     }).observe(main, { attributes: true, attributeFilter: ["class"] });
   }
+  // 视频区鼠标移动也续命/唤回控制条（事件从 tap-zone/edge-zone 冒泡上来）。
+  wrap.addEventListener("pointermove", pokeFromMouseMove);
   armAutoHide();
 
   // ---- 手势状态机：一次操作只触发一个动作 ----
   let pendingTapTimer = null; // 待确认的单击：等 300ms 看有没有第二下
   let lpTimer = null, lpInterval = null, lpSide = null, lpFired = false;
   let lpStartX = 0, lpStartY = 0, lpStartTime = 0, lpMoved = false, lpSavedRate = 1;
+  let lastRealPressEndAt = 0; // 最近一次真实点按（mouseup/touchend）结束的时间戳；浏览器自己的 click 紧跟在它后面（<100ms），靠它识别、忽略——合成 click 不更新它
 
   const doSingleTap = () => {
     if (isLocked()) return; // 锁住时单点什么都不做，按钮继续藏着
@@ -1007,6 +1035,7 @@ function bindTapSeek(video, wrap) {
       ev.preventDefault(); // 阻止合成 click 与 iOS 双击缩放
       ev.stopPropagation();
       lastTouchEnd = Date.now();
+      lastRealPressEndAt = Date.now();
       onPressEnd();
     }, { passive: false });
     target.addEventListener("touchcancel", () => { onPressCancel(); }, { passive: true });
@@ -1018,6 +1047,7 @@ function bindTapSeek(video, wrap) {
     target.addEventListener("mouseup", () => {
       if (!mouseDown) return;
       mouseDown = false;
+      lastRealPressEndAt = Date.now();
       onPressEnd();
     });
     // 按住拖出元素外再松手：target 收不到 mouseup，用 mouseleave 兜底取消，
@@ -1030,10 +1060,16 @@ function bindTapSeek(video, wrap) {
     // 长按还会触发浏览器的 contextmenu（尤其安卓）：禁掉，不让菜单盖住画面。
     target.addEventListener("contextmenu", (ev) => { ev.preventDefault(); });
     target.addEventListener("click", (ev) => {
-      // 点按已在 touchend/mouseup 里处理，click 只拦冒泡、不再触发任何动作，
+      // 点按已在 touchend/mouseup 里处理，click 正常只拦冒泡、不再触发动作，
       // 否则一次点按会触发两次（桌面端 mouseup + click 各一次）。
+      // 兜底：合成 click（自动化/无障碍工具直接派发 click，没有前置
+      // mousedown/mouseup）——没有 100ms 内的真实点按，就把它当一次点按走
+      // 同一套单击/双击逻辑；浏览器自己的 click 紧跟 mouseup（<100ms），
+      // 直接忽略，不会算两次。100ms 而不用 300ms：两次合成 click 之间
+      // 通常隔 100ms 以上，窗口太宽会把第二次合成 click 也吞掉。
       ev.stopPropagation();
       ev.preventDefault();
+      if (Date.now() - lastRealPressEndAt > 100) onPressEnd();
     });
   };
   bindTapTarget(zone, "middle");
@@ -1289,6 +1325,9 @@ async function renderPlayer(params) {
   const applyRate = () => {
     const r = parseFloat(rateSelect.value);
     if (!Number.isNaN(r)) { video.playbackRate = r; savePrefs({ rate: r }); }
+    // 选完把焦点还给页面：SELECT 拿着焦点时空格/方向键会被它吞掉，
+    // 键盘快捷键（bindPlayerKeys 遇到 INPUT/SELECT 直接返回）就失灵了。
+    try { rateSelect.blur(); } catch (_) {}
   };
   rateSelect.addEventListener("change", applyRate);
   if (initialRate !== 1.0) video.addEventListener("loadedmetadata", () => { video.playbackRate = initialRate; }, { once: true });
@@ -1301,7 +1340,7 @@ async function renderPlayer(params) {
     fitSelect.append(opt);
   }
   video.style.objectFit = initialFit;
-  fitSelect.addEventListener("change", () => { video.style.objectFit = fitSelect.value; savePrefs({ fit: fitSelect.value }); });
+  fitSelect.addEventListener("change", () => { video.style.objectFit = fitSelect.value; savePrefs({ fit: fitSelect.value }); try { fitSelect.blur(); } catch (_) {} });
 
   // 播放/暂停按钮：controls:false 后页面上必须有一个明确的播放/暂停入口，
   // 不能只靠点按视频——竖屏时 tap-zone 只覆盖视频主体（top:44px/bottom:84px，
@@ -1349,6 +1388,7 @@ async function renderPlayer(params) {
   qualitySelect.addEventListener("change", () => {
     const idx = parseInt(qualitySelect.value, 10);
     if (activeHls) { try { activeHls.nextLevel = Number.isNaN(idx) ? -1 : idx; } catch (_) {} }
+    try { qualitySelect.blur(); } catch (_) {}
   });
   window.__onHlsLevels = populateQuality;
   populateQuality(activeHlsLevels);
@@ -1367,6 +1407,40 @@ async function renderPlayer(params) {
   }
   // 锁按钮（控制条里那个）已删：角落常驻锁图标才是入口，见 renderPlayer 末尾的 setUiLock/lockIcon。
   const controls = el("div", { class: "player-controls" }, playPauseBtn, prevBtn, nextBtn, rateSelect, skipToggleBtn, landscapeBtn, moreBtn);
+  // ====== 进度条 + 当前/总时长（2026-11-09 线上复测回归） ======
+  // controls:false 后原生进度条没了，自定义控制条之前也漏了进度条——
+  // 桌面 Chrome 下 DOM 里根本没有进度条和时长。补一行：range 拖动快进
+  // （鼠标拖、触屏拖都能用）+ 当前/总时长；拖动就是手动 seek，走现成
+  // 的 seeked 学习记录（不另记）；timeupdate 同步，拖动时不抢拇指。
+  const fmtClock = (s) => {
+    if (!isFinite(s) || s == null || s < 0) s = 0;
+    const m = Math.floor(s / 60), ss = Math.floor(s % 60);
+    return m + ":" + String(ss).padStart(2, "0");
+  };
+  const seekRange = el("input", { type: "range", class: "player-seek", min: "0", max: "100", step: "0.1", value: "0", "aria-label": "播放进度" });
+  const timeLabel = el("span", { class: "player-time" }, "0:00 / 0:00");
+  const seekRow = el("div", { class: "player-seek-row" }, seekRange, timeLabel);
+  let seekDragging = false;
+  const syncSeekUI = () => {
+    const d = video.duration;
+    const t = video.currentTime || 0;
+    timeLabel.textContent = fmtClock(t) + (isFinite(d) && d > 0 ? " / " + fmtClock(d) : "");
+    if (!seekDragging && isFinite(d) && d > 0) seekRange.value = String(Math.min(100, Math.max(0, (t / d) * 100)));
+  };
+  const doSeekFromBar = () => {
+    const d = video.duration;
+    if (!isFinite(d) || d <= 0) return;
+    const pct = parseFloat(seekRange.value) || 0;
+    try { video.currentTime = (pct / 100) * d; } catch (_) {}
+    syncSeekUI();
+  };
+  seekRange.addEventListener("input", () => { seekDragging = true; doSeekFromBar(); });
+  seekRange.addEventListener("change", () => { seekDragging = false; syncSeekUI(); });
+  seekRange.addEventListener("pointerdown", () => { seekDragging = true; });
+  seekRange.addEventListener("pointerup", () => { seekDragging = false; syncSeekUI(); seekRange.blur(); });
+  video.addEventListener("timeupdate", syncSeekUI);
+  video.addEventListener("loadedmetadata", syncSeekUI);
+  video.addEventListener("durationchange", syncSeekUI);
   if (pipSupported(video)) {
     moreMenu.append(button("画中画", { variant: "text", icon: "picture_in_picture", onclick: () => togglePictureInPicture(video) }));
   }
@@ -1374,7 +1448,7 @@ async function renderPlayer(params) {
   // 右侧滚动提示：竖屏 393px 下主排仍可能超出，一排滑不动时用户不知道
   // 后面还有按钮；“›”只在还能往右滑时出现，滑到底就消失。
   const scrollHint = el("span", { class: "controls-scroll-hint is-hidden", "aria-hidden": "true" }, "›");
-  const controlsWrap = el("div", { class: "player-controls-wrap" }, controls, scrollHint);
+  const controlsWrap = el("div", { class: "player-controls-wrap" }, seekRow, controls, scrollHint);
   main.append(controlsWrap, moreMenu);
   const updateScrollHint = () => {
     try { scrollHint.classList.toggle("is-hidden", controls.scrollWidth - controls.clientWidth - controls.scrollLeft <= 8); } catch (_) {}
@@ -1397,6 +1471,8 @@ async function renderPlayer(params) {
   const playCtx = { plugin, src, title: seriesTitle, bid };
   const roadsPromise = plugin && src ? loadRoadsAndHistory(plugin, src, bid).catch(() => null) : Promise.resolve(null);
   roadsPromise.then((info) => {
+    // 切集/离页后才回来：本页的 DOM 已拆，别再碰旧按钮、也别给旧集预热字幕。
+    if (!video.isConnected) return;
     const currentRoad = info && info.roads[roadNum];
     if (!currentRoad || !Array.isArray(currentRoad.episodes)) return;
     const eps = currentRoad.episodes;
@@ -1440,6 +1516,7 @@ async function renderPlayer(params) {
   subSelect.append(dualOpt, zhOpt, offOpt);
   subSelect.addEventListener("change", () => {
     dualSub.setMode(subSelect.value);
+    try { subSelect.blur(); } catch (_) {}
     toast(subSelect.value === dualSub.dualMode ? "已切换" + dualSub.dualLabel + "字幕（" + (dualSub.ovlLang === "en" ? "英文" : "日文") + "叠加 + 画面中文字幕）"
       : subSelect.value === "zh" ? "仅中文：只看画面自带中文字幕" : "字幕已关");
   });
@@ -1448,6 +1525,9 @@ async function renderPlayer(params) {
   let subUIHandled = false;
   const showSubUI = () => {
     if (subUIHandled || !dualSub.done) return;
+    // 离页后（切集/返回）2500ms 的延迟回调才跑：video 已不在文档里，
+    // 别再碰已拆掉的 DOM、也别在别的页面上弹字幕 toast（引用过期那类问题）。
+    if (!video.isConnected) return;
     subUIHandled = true;
     // 字幕文件存在但加载失败时在播放页 meta 区提示，不静默
     if (dualSub.loadError) showError("双语字幕加载失败：" + dualSub.loadError + "（视频本身的中文字幕仍可正常看）");

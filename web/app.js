@@ -1759,10 +1759,13 @@ async function renderTabPopular(container, initialRegion) {
   // 去重只对当前已加载的 ID，不许用常驻集合跨次过滤（翻一点就没了的教训）。
   async function loadSpecialZonePage(myEpoch) {
     const key = POPULAR_STATE.region;
-    const isKids = key === "kids";
-    const cache = isKids ? KIDS_FULL_CACHE : NEW_SHOWS_CACHE;
+    // 注意：这里不许叫 isKids——全局已有 isKids(item) 函数（少儿分流用），
+    // 局部同名 const 会把它遮住，下面 isKids(it) 调用就变成“布尔值当函数”，
+    // 少儿/新剧入口直接崩（2026-11-09 线上复测回归）。叫 isKidsZone。
+    const isKidsZone = key === "kids";
+    const cache = isKidsZone ? KIDS_FULL_CACHE : NEW_SHOWS_CACHE;
     const cacheKey = fmtDateYMD(new Date());
-    if (isKids) {
+    if (isKidsZone) {
       // 少儿：从国漫搜索里分流，完整翻页，不设 20 部上限，按热度排。
       const region = REGIONS.find((r) => r.key === "cn");
       const q = new URLSearchParams();

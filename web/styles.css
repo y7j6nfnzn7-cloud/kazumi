@@ -1141,6 +1141,11 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
 .player-controls { display: flex; flex-wrap: nowrap; gap: 8px; margin: 16px 0; overflow-x: auto; overflow-y: hidden; align-items: center; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .player-controls::-webkit-scrollbar { display: none; }
 .player-controls > * { flex: 0 0 auto; min-height: 48px; }
+/* 进度条行（2026-11-09 线上复测回归补）：range 拖动快进 + 当前/总时长，
+   放在按钮行上面；跟控制条一起自动隐藏（.controls-hidden），拖它也续命。 */
+.player-seek-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }
+.player-seek { flex: 1; min-width: 0; height: 28px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.player-time { flex: 0 0 auto; font-size: 13px; font-variant-numeric: tabular-nums; opacity: 0.85; white-space: nowrap; }
 /* 控制条紧凑化 + 自动隐藏（按钮比例对照国内播放器后调：竖屏 393px 下
    单个按钮 50–115px 宽、高 48px；锁图标 48px 占屏宽 12.2%，与 B站/腾讯/
    爱奇艺手机端的 40–48px（占屏宽约 10–12%）相当；带中文文案的按钮仍比
@@ -1155,8 +1160,9 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
    避免布局跳动）；单点/点锁图标时再出现；暂停时一直显示；锁住时由
    .ui-locked 的 display:none 藏着。锁图标（.ui-lock-btn）与字幕永不隐藏，
    所以这里不列它们。 */
-.player-controls, .skip-intro-btn, .rotate-exit, .player-wrap .player-back { transition: opacity .3s; }
+.player-controls, .player-seek-row, .skip-intro-btn, .rotate-exit, .player-wrap .player-back { transition: opacity .3s; }
 .player-main.controls-hidden .player-controls,
+.player-main.controls-hidden .player-seek-row,
 .player-main.controls-hidden .skip-intro-btn,
 .player-main.controls-hidden .rotate-exit,
 .player-main.controls-hidden .player-back { opacity: 0; visibility: hidden; pointer-events: none; }

@@ -63,7 +63,7 @@ var REPORT_KEY = "selfcheckLastReport";
 var BACKUP_KEY = "selfcheckRuleBackups";
 var SEARCH_TIMEOUT_MS = 10000;
 var EPISODES_TIMEOUT_MS = 15000;
-var RESOLVE_TIMEOUT_MS = 20000;
+var RESOLVE_TIMEOUT_MS = 45000;
 
 // ---- 纯函数（可单测，也挂到 window.KazumiSelfCheck 上） ----
 // 版本号比较：纯数字点分段可比时返回 -1/0/1；带非数字段时返回 null（不可比，不自动更新）
@@ -626,7 +626,9 @@ report.updates.push({ name: "-", action: "skip", detail: "官方目录拉不到�
 // 3 部番逐源验证（全部已装规则）
 progress("正在逐源验证 3 部番…");
 var names = installed.map(function (p) { return p.name;});
-report.verify = await Promise.all(names.map(function (n) { return verifyRule(n);}));
+var _verifyResults = [];
+for (var _vi = 0; _vi < names.length; _vi++) { _verifyResults.push(await verifyRule(names[_vi])); }
+report.verify = _verifyResults;
 report.ok = report.checks.every(function (c) { return c.ok;})
 && report.verify.every(function (v) { return v.ok;})
 && report.updates.every(function (u) { return u.action === "updated" || u.action === "skip" || u.action === "skip-no-backup" || u.action === "skip-version";});
