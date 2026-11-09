@@ -2863,7 +2863,9 @@ function openCharacterSheet(ch) {
 // 自动识别最优源（2026-11-09 用户定：“你要加的是自动识别最优的源，
 // 显示延迟多少用这个”）：点“开始观看”不再弹来源表，并行测全部已装
 // 规则的检索延迟，取搜到结果里最快的那一个直接播，并把各源延迟记
-// 在本地（pluginLatency），供播放页排序、换源和显示用；全部搜不到
+// 在本地（pluginLatency），供播放页排序、换源和显示用；24 小时内
+// 解析失败过的源（pluginParseFail，播放页解析失败时记、成功时清）
+// 不做首选，全部失败过才按延迟从低到高试；全部搜不到
 // 才打开手动选源表（改词/别名重试）。
 // ============================================================
 async function autoPlayBangumi(bangumi) {
@@ -2892,8 +2894,18 @@ async function autoPlayBangumi(bangumi) {
     localStorage.setItem("pluginLatency", JSON.stringify(lat));
   } catch (_) {}
   const ok = results.filter((r) => r.items.length).sort((a, b) => a.ms - b.ms);
-  if (ok.length) {
-    const best = ok[0];
+  // 跳过 24 小时内解析失败过的源（MXdm 检索最快但解析次次 504，
+  // 再首选它只会白等 20 秒）；如果全部源都被跳过，就按原来的延迟
+  // 从低到高试，不卡死。
+  let usable = ok;
+  try {
+    const fails = JSON.parse(localStorage.getItem("pluginParseFail") || "{}") || {};
+    const now = Date.now();
+    const fresh = ok.filter((r) => !(fails[r.name] != null && now - fails[r.name] < 24 * 60 * 60 * 1000));
+    if (fresh.length) usable = fresh;
+  } catch (_) {}
+  if (usable.length) {
+    const best = usable[0];
     localStorage.setItem("lastPlugin", best.name);
     toast("已选最快的源：" + best.name + "（延迟 " + (best.ms / 1000).toFixed(1) + " 秒）");
     startPlayback({ plugin: best.name, src: best.items[0].src, title, bid: String(bangumi.id) });

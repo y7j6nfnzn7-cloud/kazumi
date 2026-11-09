@@ -907,8 +907,21 @@ async function renderPlayer(params) {
       lat[plugin] = resolveMs;
       localStorage.setItem("pluginLatency", JSON.stringify(lat));
     } catch (_) {}
+    // 解析成功：清除该源的失败记录，下次自动选源不再跳过它。
+    try {
+      const fails = JSON.parse(localStorage.getItem("pluginParseFail") || "{}") || {};
+      if (fails[plugin] != null) { delete fails[plugin]; localStorage.setItem("pluginParseFail", JSON.stringify(fails)); }
+    } catch (_) {}
   } catch (e) {
-    // 这个源解析失败（比如 AGE 某条目 20 秒超时 504）：自动换别的源试
+    // 这个源解析失败（比如 AGE 某条目 20 秒超时 504）：记下失败时间，
+    // 24 小时内自动选源不再首选它（MXdm 检索最快但解析次次 504，
+    // 再首选它只会白等 20 秒）。再自动换别的源试同一集，
+    // 不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
+    try {
+      const fails = JSON.parse(localStorage.getItem("pluginParseFail") || "{}") || {};
+      fails[plugin] = Date.now();
+      localStorage.setItem("pluginParseFail", JSON.stringify(fails));
+    } catch (_) {}
     // 同一集，不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
     // fb 记录已试过的源，防止 AGE→MXdm→AGE 来回跳。
     const tried = new Set((params.fb || "").split(",").filter(Boolean).concat([plugin]));
