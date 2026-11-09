@@ -897,11 +897,57 @@ async function renderPlayer(params) {
   page.append(status);
 
   let data;
+  let resolveMs = 0;
+  const resolveStart = performance.now();
   try {
     data = await fetchJson("/api/resolve?plugin=" + encodeURIComponent(plugin) + "&episodeUrl=" + encodeURIComponent(episodeUrl));
+    resolveMs = Math.round(performance.now() - resolveStart);
+    try {
+      const lat = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {};
+      lat[plugin] = resolveMs;
+      localStorage.setItem("pluginLatency", JSON.stringify(lat));
+    } catch (_) {}
   } catch (e) {
+    // 这个源解析失败（比如 AGE 某条目 20 秒超时 504）：自动换别的源试
+    // 同一集，不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
+    // fb 记录已试过的源，防止 AGE→MXdm→AGE 来回跳。
+    const tried = new Set((params.fb || "").split(",").filter(Boolean).concat([plugin]));
+    const seriesName = (title || "").split(" · ").slice(0, -1).join(" · ") || title || "";
+    status.textContent = "这个源播不出来，正在自动换别的源试同一集…";
+    let next = null;
+    let hadOthers = false;
+    try {
+      const plugins = await fetchJson("/api/plugins");
+      let latMap = {};
+      try { latMap = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {}; } catch (_) {}
+      const ordered = plugins.slice().sort((a, b) => (latMap[a.name] == null ? 1e9 : latMap[a.name]) - (latMap[b.name] == null ? 1e9 : latMap[b.name]));
+      for (const p of ordered) {
+        if (tried.has(p.name)) continue;
+        hadOthers = true;
+        let items = [];
+        try { items = await pluginSearchSingle(p.name, seriesName); } catch (_) { continue; }
+        if (!items.length) continue;
+        let info = null;
+        try { info = await loadRoadsAndHistory(p.name, items[0].src, bid); } catch (_) { continue; }
+        const eps = ((info.roads || [])[0] || {}).episodes || [];
+        if (!eps[epNum - 1]) continue;
+        next = { plugin: p.name, src: items[0].src, ep: eps[epNum - 1] };
+        break;
+      }
+    } catch (_) { /* 拿规则列表失败就直接报错 */ }
+    if (next) {
+      localStorage.setItem("lastPlugin", next.plugin);
+      toast("已自动换源，正在解析…");
+      go("/play", {
+        plugin: next.plugin, episodeUrl: next.ep.src,
+        title: (seriesName ? seriesName + " · " : "") + next.ep.name,
+        episode: String(epNum), road: "0", src: next.src,
+        bid: bid || undefined, fb: [...tried, next.plugin].join(","),
+      });
+      return;
+    }
     status.remove();
-    page.append(errorState({ title: "解析失败", message: e.message, onRetry: () => renderPlayer(params) }));
+    page.append(errorState({ title: "解析失败", message: hadOthers ? "这个源播不出来，换了其他源也播不出来：" + e.message : e.message, onRetry: () => renderPlayer(params) }));
     return;
   }
   status.remove();
@@ -995,7 +1041,7 @@ async function renderPlayer(params) {
   const typeLabel = data.streamType === "hls"
     ? "HLS" + (nativeHlsSupported(video) ? "（原生）" : "（hls.js）")
     : data.streamType === "mp4" ? "MP4" : "直链";
-  main.append(el("div", { class: "player-meta" }, "规则 " + data.pluginName + " · " + typeLabel + " · " + data.originalUrl));
+  main.append(el("div", { class: "player-meta" }, "规则 " + data.pluginName + " · " + typeLabel + " · 延迟 " + (resolveMs / 1000).toFixed(1) + " 秒"));
 
   video.addEventListener("error", () => {
     showError("播放器报告错误。可能是源失效或浏览器不支持该格式。");

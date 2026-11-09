@@ -1009,6 +1009,21 @@ select.btn {
 .ep-row .icon { color: inherit; }
 .ep-row:active { border-radius: 12px !important; }
 
+/* 选集改版（2026-11-09）：248 集一集一行要拖到底，改成紧凑网格+分段。
+   393px 竖屏一行 5 格，一屏能看到约 25 集；50 集一段，一点就跳段。 */
+.ep-controls { position: sticky; top: calc(56px + 56px + env(safe-area-inset-top)); z-index: 3; background: var(--surface); display: flex; align-items: center; gap: 8px; padding: 4px 0 10px; flex-wrap: wrap; }
+.ep-controls .btn { flex: 0 0 auto; }
+.ep-range-select { flex: 0 0 auto; min-height: 40px; padding: 0 10px; border-radius: 20px; border: 1px solid var(--outline-variant); background: var(--surface-container); color: var(--on-surface); font-size: 14px; font-weight: 600; }
+.ep-jump { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.ep-jump-input { width: 72px; min-height: 40px; padding: 0 10px; border-radius: 20px; border: 1px solid var(--outline-variant); background: var(--surface-container); color: var(--on-surface); font-size: 14px; text-align: center; }
+.ep-jump-input::-webkit-outer-spin-button, .ep-jump-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+.ep-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 2px 0 16px; }
+.ep-cell { min-height: 48px; padding: 0 4px; border-radius: 14px; border: 1px solid var(--outline-variant); background: var(--surface-container); color: var(--on-surface); font-size: 16px; font-weight: 600; cursor: pointer; }
+.ep-cell:active { transform: scale(0.96); }
+.ep-cell.is-current { background: var(--primary); color: var(--on-primary); border-color: transparent; font-weight: 700; }
+.ep-cell.is-playing::after { content: " ▶"; font-size: 11px; }
+.player-panel .ep-controls { top: 56px; }
+
 .ep-comments-header { display: flex; align-items: center; gap: 8px; padding: 8px 4px 12px; }
 .ep-comments-current { flex: 1; min-width: 0; line-height: 1.3; }
 .ep-comments-current-top { font-size: var(--title-small-size); font-weight: 700; }

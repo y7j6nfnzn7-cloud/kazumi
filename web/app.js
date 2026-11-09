@@ -2810,10 +2810,10 @@ async function renderBangumiDetail(params) {
 
   renderTabBody("summary");
 
-  // FAB: 开始观看
+  // FAB: 开始观看（自动选源，不弹选源表——见 autoPlayBangumi）
   const fab = el("button", { class: "fab sl is-extended", "aria-label": "开始观看" });
   fab.append(iconSvg("play_arrow"), document.createTextNode("开始观看"));
-  fab.addEventListener("click", () => openSourcePicker(bangumi));
+  fab.addEventListener("click", () => autoPlayBangumi(bangumi));
   page.append(fab);
 }
 
@@ -2860,7 +2860,51 @@ function openCharacterSheet(ch) {
 }
 
 // ============================================================
+// 自动识别最优源（2026-11-09 用户定：“你要加的是自动识别最优的源，
+// 显示延迟多少用这个”）：点“开始观看”不再弹来源表，并行测全部已装
+// 规则的检索延迟，取搜到结果里最快的那一个直接播，并把各源延迟记
+// 在本地（pluginLatency），供播放页排序、换源和显示用；全部搜不到
+// 才打开手动选源表（改词/别名重试）。
+// ============================================================
+async function autoPlayBangumi(bangumi) {
+  const title = bangumi.nameCn || bangumi.name;
+  let plugins = [];
+  try {
+    plugins = await fetchJson("/api/plugins");
+  } catch (_) {
+    openSourcePicker(bangumi);
+    return;
+  }
+  if (!plugins.length) { openSourcePicker(bangumi); return; }
+  toast("正在测哪个源最快…");
+  const results = await Promise.all(plugins.map(async (p) => {
+    const s = performance.now();
+    try {
+      const items = await pluginSearchSingle(p.name, title);
+      return { name: p.name, ms: Math.round(performance.now() - s), items };
+    } catch (e) {
+      return { name: p.name, ms: Math.round(performance.now() - s), items: [], error: e.code || "error" };
+    }
+  }));
+  try {
+    const lat = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {};
+    for (const r of results) lat[r.name] = r.ms;
+    localStorage.setItem("pluginLatency", JSON.stringify(lat));
+  } catch (_) {}
+  const ok = results.filter((r) => r.items.length).sort((a, b) => a.ms - b.ms);
+  if (ok.length) {
+    const best = ok[0];
+    localStorage.setItem("lastPlugin", best.name);
+    toast("已选最快的源：" + best.name + "（延迟 " + (best.ms / 1000).toFixed(1) + " 秒）");
+    startPlayback({ plugin: best.name, src: best.items[0].src, title, bid: String(bangumi.id) });
+    return;
+  }
+  openSourcePicker(bangumi);
+}
+
+// ============================================================
 // 播放来源 sheet（source_sheet_view.dart：分组折叠 + 预览模式 + SplitList 结果行）
+// 手动选源入口：仅在自动选源全部搜不到时打开，平时不弹给用户。
 // ============================================================
 async function openSourcePicker(bangumi) {
   openSheet({ title: "播放来源", desc: "正在加载规则…" }, async (body, close, ctl) => {
@@ -3101,6 +3145,12 @@ function episodePanel(ctx) {
   const roads = ctx.roads;
   let activeRoadIdx = roads[ctx.activeRoadIdx] ? ctx.activeRoadIdx : 0;
   const roadName = (i) => roads[i].name || "播放列表 " + (i + 1);
+  // 选集改版（2026-11-09 用户反馈：248 集要一直往下拖太麻烦）：
+  // 全局生效——一集一行的长列表改成紧凑网格（每行 5 格），每 50 集一段，
+  // 加倒序、最新、跳集，点一下就能到想看的那段，不用再长拖。
+  const EP_PAGE = 50;
+  let descending = false;
+  let rangeIdx = -1;
 
   function render() {
     root.innerHTML = "";
@@ -3108,7 +3158,7 @@ function episodePanel(ctx) {
     const routeBtn = el("button", { class: "route-btn sl", type: "button" },
       el("div", { class: "body" }, el("div", { class: "label" }, "播放线路"), el("div", { class: "name" }, roadName(activeRoadIdx))),
       iconSvg("expand_more"));
-    if (roads.length < 2) routeBtn.querySelector(".icon").style.visibility = "hidden";
+    if (roads.length < 2) routeBtn.style.display = "none"; // 只有一条线路时不让用户选线路（2026-11-09：不让他选）
     routeBtn.addEventListener("click", () => {
       if (roads.length < 2) return;
       routeBtn.classList.add("is-open");
@@ -3129,24 +3179,71 @@ function episodePanel(ctx) {
     const lw = ctx.lastWatched;
     const lastIdx = lw && lw.road === activeRoadIdx ? lw.episode - 1 : -1;
     const currentIdx = playing >= 0 ? playing : lastIdx;
-    const list = splitList(eps.map((ep, i) => {
-      const isCur = i === currentIdx;
+    const total = eps.length;
+    const numRanges = Math.max(1, Math.ceil(total / EP_PAGE));
+    if (rangeIdx < 0 || rangeIdx >= numRanges) rangeIdx = currentIdx >= 0 ? Math.floor(currentIdx / EP_PAGE) : 0;
+    const rangeStart = rangeIdx * EP_PAGE;
+    const rangeEnd = Math.min(total, rangeStart + EP_PAGE);
+    const shownIdxs = [];
+    for (let i = rangeStart; i < rangeEnd; i++) shownIdxs.push(i);
+    if (descending) shownIdxs.reverse();
+    const grid = el("div", { class: "ep-grid" });
+    for (const i of shownIdxs) {
+      const ep = eps[i];
+      const m = ep.name ? String(ep.name).match(/\d+/) : null;
+      const num = m ? parseInt(m[0], 10) : i + 1;
       let sub = "";
       if (i === playing) sub = "正在播放";
       else if (i === lastIdx) sub = lw.progressMs > 0 ? "上次看到 " + formatPosition(lw.progressMs) : "上次观看";
-      return splitRow(el("div", { class: "ep-row" + (isCur ? " is-current" : "") },
-        el("div", { class: "body" }, el("div", { class: "name" }, ep.name), sub ? el("div", { class: "sub" }, sub) : null),
-        isCur ? iconSvg("play_arrow") : null),
-        { onclick: () => { if (i !== playing) go("/play", playEpisodeParams(ctx, ep, i, activeRoadIdx)); } });
-    }), { tight: true, r20: true });
+      const cell = el("button", {
+        class: "ep-cell sl" + (i === currentIdx ? " is-current" : "") + (i === playing ? " is-playing" : ""),
+        type: "button", "data-ep": String(i + 1),
+        title: ep.name + (sub ? " · " + sub : ""),
+        "aria-label": ep.name + (sub ? "，" + sub : ""),
+        onclick: () => { if (i !== playing) go("/play", playEpisodeParams(ctx, ep, i, activeRoadIdx)); },
+      }, String(num));
+      grid.append(cell);
+    }
     const locate = button("定位当前集", { variant: "text", small: true, icon: "my_location", onclick: () => {
-      const cur = list.querySelector(".ep-row.is-current");
+      if (currentIdx < 0) { toast("还没有观看记录"); return; }
+      rangeIdx = Math.floor(currentIdx / EP_PAGE);
+      render();
+      const cur = root.querySelector(".ep-cell.is-current");
       if (cur) cur.scrollIntoView({ behavior: "smooth", block: "center" });
-      else toast("还没有观看记录");
     } });
+    const sortBtn = button(descending ? "正序" : "倒序", { variant: "text", small: true, icon: "sort", onclick: () => { descending = !descending; render(); } });
+    const latestBtn = button("最新", { variant: "text", small: true, icon: "skip_next", onclick: () => {
+      if (!total) return;
+      descending = false;
+      rangeIdx = numRanges - 1;
+      render();
+      const last = root.querySelector('.ep-cell[data-ep="' + total + '"]');
+      if (last) last.scrollIntoView({ behavior: "smooth", block: "center" });
+    } });
+    const jumpInput = el("input", { class: "ep-jump-input", type: "number", min: "1", max: String(total), placeholder: "集数", inputmode: "numeric", "aria-label": "跳到第几集" });
+    const jumpBtn = button("跳", { variant: "text", small: true, onclick: () => {
+      const n = parseInt(jumpInput.value, 10);
+      if (!n || n < 1 || n > total) { toast("请输入 1-" + total + " 之间的集数"); return; }
+      rangeIdx = Math.floor((n - 1) / EP_PAGE);
+      render();
+      const cell = root.querySelector('.ep-cell[data-ep="' + n + '"]');
+      if (cell) cell.scrollIntoView({ behavior: "smooth", block: "center" });
+    } });
+    const controlsChildren = [sortBtn, latestBtn, el("div", { class: "ep-jump" }, jumpInput, jumpBtn)];
+    if (numRanges > 1) {
+      const rangeSel = el("select", { class: "ep-range-select", "aria-label": "选择集数范围" });
+      for (let r = 0; r < numRanges; r++) {
+        rangeSel.append(el("option", { value: String(r) }, (r * EP_PAGE + 1) + "-" + Math.min(total, (r + 1) * EP_PAGE) + "集"));
+      }
+      rangeSel.value = String(rangeIdx);
+      rangeSel.addEventListener("change", () => { rangeIdx = parseInt(rangeSel.value, 10); render(); });
+      controlsChildren.unshift(rangeSel);
+    }
+    const controls = el("div", { class: "ep-controls" }, ...controlsChildren);
     root.append(routeBtn,
       el("div", { class: "ep-toolbar" }, el("span", { class: "ep-count" }, "全部剧集 · " + eps.length + " 集"), locate),
-      list);
+      controls,
+      grid);
   }
   render();
   return root;
