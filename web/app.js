@@ -866,8 +866,12 @@ function isKids(item) {
 //   Bangumi 上 rank 很好。所以热度不能用 rank 定，置顶用名单定、其余用
 //   搜索的 heat 排序定。
 // 置顶热榜：按真实网络热度（播放量/讨论度）排，最热在前；id 是 Bangumi 条目号。
-// 取第一季/主条目，每部只取一条，不重复占位。完美世界/少年歌行/遮天/不良人
-// 因 Bangumi 接口不稳暂未拿到稳定 id，拿到后补进（不在此硬猜 id）。
+// 取第一季/主条目，每部只取一条，不重复占位。
+// 前 20 部是用户 2026-11-08 亲口定的顺序，一字不动；第 21–40 部是按
+// 灯塔/云合/骨朵真实播放量排的下一档（2026-11-08 补）：完美世界、
+// 少年歌行、遮天、不良人的稳定 id 这次拿到了，一并补进；一念永恒
+// （Bangumi rank 3576 严重低估，真实月播约 2 亿）排第 25。
+// 注意：Bangumi rank 对国漫不准，不能用 rank 定热度，置顶用名单定。
 const CN_HOT_IDS = [
   153197, // 斗破苍穹 (2017)
   199425, // 斗罗大陆 (2018)
@@ -889,6 +893,26 @@ const CN_HOT_IDS = [
   223148, // 星辰变 (2018)
   224641, // 武动乾坤 (2019)
   291213, // 大王饶命 (2021)
+  244224, // 完美世界 (2021)
+  366897, // 神印王座 (2022)
+  403607, // 沧元图 (2023)
+  345768, // 遮天 (2023)
+  244226, // 一念永恒 (2020)
+  109677, // 画江湖之不良人 (2014)
+  240738, // 少年歌行 (2018)
+  312298, // 诛仙 (2022)
+  137937, // 狐妖小红娘 (2015)
+  183957, // 大理寺日志 (2020)
+  405212, // 凸变英雄X (2025)
+  358660, // 中国奇谭 (2023)
+  320224, // 时光代理人 (2021)
+  13603, // 罗小黑战记 (2011)
+  440171, // 长生界 (2024)
+  140217, // 择天记 (2015)
+  176509, // 武庚纪 (2016)
+  127448, // 天行九歌 (2016)
+  380473, // 暗河传 (2023)
+  380466, // 少年白马醉春风 (2022)
 ];
 // （sortCnMain 已移除：地区分类改走 /api/bangumi/search 分页取数，不再是
 //  一次性 tag 随机样本 + 本地分桶排序。见 loadMore 地区分支。）
@@ -1069,10 +1093,12 @@ function renderHomeSectionsFrom(items, host) {
 }
 
 // 新番自动更新（2026-11-08 用户亲口定：有新剧推出要自动出现）：
-// 每次打开分类就现查 /api/bangumi/search，取该地区近 90 天内开播的番，
-// 按热度排，取 12 部横滑展示。新剧一开播（开播日在 90 天内）就自动进
+// 每次打开分类就现查 /api/bangumi/search，取该地区近 180 天内开播的番，
+// 按热度排，取 12 部横滑展示。新剧一开播（开播日在 180 天内）就自动进
 // 这一节，不用手动加、不用改代码。sort=airDate 后端不生效，所以用
-// airDate 范围过滤 + sort=heat（实测 90 天国漫 19 条、日漫更多）。
+// airDate 范围过滤 + sort=heat。窗口从 90 天放宽到 180 天：国漫一季
+// 常播 3–6 个月，90 天会把还在更新的新番漏掉（一斩苍穹 2026-07-28
+// 开播，到 11 月 8 日已 103 天，90 天窗口就看不到它）。
 function fmtDateYMD(d) {
   const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
   return y + "-" + m + "-" + day;
@@ -1094,12 +1120,12 @@ async function loadRegionNewShows(host, regionKey) {
   const cacheKey = regionKey + "|" + fmtDateYMD(new Date());
   if (REGION_NEW_CACHE.has(cacheKey)) {
     const items = REGION_NEW_CACHE.get(cacheKey);
-    if (items.length) renderHomeSection(host, "region-new", "新番", "近 90 天开播，自动更新", items);
+    if (items.length) renderHomeSection(host, "region-new", "新番", "近 180 天开播，自动更新", items);
     return;
   }
   try {
     const today = new Date();
-    const start = new Date(today); start.setDate(today.getDate() - 90);
+    const start = new Date(today); start.setDate(today.getDate() - 180);
     const q = new URLSearchParams();
     q.set("keyword", "");
     q.set("offset", "0");
@@ -1110,9 +1136,14 @@ async function loadRegionNewShows(host, regionKey) {
     let items = (data && data.items) || [];
     // 国漫：少儿不进新番节（跟主榜同一条硬规则）
     if (regionKey === "cn") items = items.filter((it) => !isKids(it));
+    // 新番按开播日倒序（最新开播的排前面），不按 Bangumi 热度：
+    // 热度排会把刚开播、Bangumi 上还没人气的真新番埋掉（一斩苍穹
+    // 2026-07-28 开播，热度进不了前 12，按日期排能进前 10）。
+    // 后端 sort=airDate 不生效，所以这里自己按日期排。
+    items.sort((a, b) => String(b.airDate || "") < String(a.airDate || "") ? -1 : String(b.airDate || "") > String(a.airDate || "") ? 1 : 0);
     items = items.slice(0, 12);
     REGION_NEW_CACHE.set(cacheKey, items);
-    if (items.length) renderHomeSection(host, "region-new", "新番", "近 90 天开播，自动更新", items);
+    if (items.length) renderHomeSection(host, "region-new", "新番", "近 180 天开播，自动更新", items);
   } catch (_) {
     // 静默失败：新番节不显示，不挡主榜
   }
