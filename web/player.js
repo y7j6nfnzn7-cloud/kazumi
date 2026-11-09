@@ -512,12 +512,120 @@ async function reportProgress(payload) {
 }
 
 // 当前播放页持有的 hls.js 实例，跳出页面时销毁
+// ====== 跳过片头（只做片头；片尾不做——播完停在那儿，点“下一集”即可） ======
+// 双来源（用户定）：
+//  (1) Mika 预先实测标定（主来源）：看每部番第 1 集，从 0:00 起记片头曲结束、
+//      正片第一句对白/第一个正片镜头出现的秒数 = introEnd，存进服务端共享的
+//      web/skip-points.json（points，source:"measured"，同一季通用，换 OP 重标；
+//      字幕可辅助判断：OP 歌词结束、对白开始就是点）。表里没写的番不自动跳，
+//      不猜秒数。不用黑帧/静音自动检测当正式办法：吞噬星空开头约 20 秒本身
+//      就是黑底 AXIS 卡，黑帧检测会把正片开头当片头误跳。
+//  (2) 他手动跳的纠错（覆盖来源）：同一部番、同一源，他在片头时段手动快进/
+//      拖进度条，落点在 ±5 秒内出现 3 次以上，才以他的落点为准覆盖 Mika 的
+//      标定；不到 3 次不采用。表里记每次落点和次数，满 3 次才生效。
+// 共享说明：正式表 web/skip-points.json 是服务端共享的唯一真源（手机与 VM
+// 共用）；浏览器本地只存“候选”（localStorage skipCandidates），因为前端
+// 没有写回静态文件的接口——候选满 3 次后会 POST /api/skip-points/report
+// 上报（subs/proxy.py 已实现，审核队列存 subs/skip-reports.json），由 Mika
+// 审核后写进正式表；服务端收到的 learned 点也可经 GET /api/skip-points/learned
+// 读回（见 loadLearnedSkipPoints），跨设备共享，不用等写表。正式表当前为
+// 空（points:{}），自动跳在任何番上都不生效，直到标定写入。
+let SKIP_POINTS_CACHE = null;
+async function loadSkipPoints() {
+  if (SKIP_POINTS_CACHE) return SKIP_POINTS_CACHE;
+  try {
+    const r = await fetch("/assets/skip-points.json");
+    if (!r.ok) throw new Error("no skip table");
+    SKIP_POINTS_CACHE = await r.json();
+  } catch (_) { SKIP_POINTS_CACHE = { points: {}, candidates: {} }; }
+  return SKIP_POINTS_CACHE;
+}
+function skipKey(bid, plugin) { return String(bid || "") + "|" + String(plugin || ""); }
+function loadSkipCandidates() {
+  try { return JSON.parse(localStorage.getItem("skipCandidates") || "{}") || {}; } catch (_) { return {}; }
+}
+function saveSkipCandidates(o) {
+  try { localStorage.setItem("skipCandidates", JSON.stringify(o)); } catch (_) {}
+}
+function loadSkipPromoted() {
+  try { return JSON.parse(localStorage.getItem("skipPromoted") || "{}") || {}; } catch (_) { return {}; }
+}
+function saveSkipPromoted(o) {
+  try { localStorage.setItem("skipPromoted", JSON.stringify(o)); } catch (_) {}
+}
+// 手动跳过学习：fromSec<60（片头时段内出发）、向前跳 >=10 秒、落点 10–180 秒
+// 才记一次。同一 key 下与落点 ±5 秒内的样本满 3 次，取中位数扶正为正式
+// introEnd（覆盖 Mika 标定），并尝试上报服务端。
+function recordManualSkip(bid, plugin, fromSec, toSec) {
+  try {
+    if (bid == null || !plugin) return;
+    if (!(fromSec < 60) || !(toSec - fromSec >= 10) || toSec < 10 || toSec > 180) return;
+    const key = skipKey(bid, plugin);
+    const all = loadSkipCandidates();
+    const rec = all[key] || { samples: [] };
+    rec.samples.push(Math.round(toSec));
+    if (rec.samples.length > 20) rec.samples = rec.samples.slice(-20);
+    all[key] = rec;
+    saveSkipCandidates(all);
+    const cluster = rec.samples.filter((s) => Math.abs(s - toSec) <= 5);
+    if (cluster.length >= 3) {
+      const sorted = cluster.slice().sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      const promoted = loadSkipPromoted();
+      if (promoted[key] !== median) {
+        promoted[key] = median;
+        saveSkipPromoted(promoted);
+        // 上报服务端审核写表（无此接口时静默失败；本地已扶正可用）
+        try {
+          fetch("/api/skip-points/report", { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ key, bid: String(bid), plugin, introEnd: median, samples: rec.samples, source: "learned", count: cluster.length }) }).catch(() => {});
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+// 服务端 learned 点（第三来源）：用户在任何设备上手动 3 次扶正的点，
+// 上报后存在服务端审核队列里；播放页启动时拉一次 GET /api/skip-points/learned
+// 读回，优先级在 本机扶正（skipPromoted）与正式表（skip-points.json）之后。
+// 这样手机上扶正的点不用等 Mika 写表，VM 也能用；Mika 审核后写进正式表，
+// 正式表仍是最高优先级的共享真源。拉不到就当没有，不挡播放。
+let SKIP_LEARNED_CACHE = null;
+async function loadLearnedSkipPoints() {
+  if (SKIP_LEARNED_CACHE) return SKIP_LEARNED_CACHE;
+  try {
+    const r = await fetch("/api/skip-points/learned");
+    if (!r.ok) throw new Error("no learned table");
+    SKIP_LEARNED_CACHE = await r.json();
+  } catch (_) { SKIP_LEARNED_CACHE = { points: {} }; }
+  return SKIP_LEARNED_CACHE;
+}
+// 生效的 introEnd：他手动 3 次扶正的 > Mika 实测标定的 > 服务端 learned 的；都没有则 null（不跳）。
+async function effectiveIntroEnd(bid, plugin) {
+  const key = skipKey(bid, plugin);
+  const promoted = loadSkipPromoted();
+  if (promoted[key] != null) return { introEnd: promoted[key], source: "learned" };
+  const table = await loadSkipPoints();
+  const row = (table.points || {})[key] || (table.points || {})[String(bid) + "|*"];
+  if (row && row.introEnd != null) return { introEnd: row.introEnd, source: row.source || "measured" };
+  const learned = await loadLearnedSkipPoints();
+  const lr = (learned.points || {})[key] || (learned.points || {})[String(bid) + "|*"];
+  if (lr && lr.introEnd != null) return { introEnd: lr.introEnd, source: "learned" };
+  return null;
+}
+function fmtSkipTime(s) {
+  const m = Math.floor(s / 60), ss = Math.floor(s % 60);
+  return m + ":" + String(ss).padStart(2, "0");
+}
+
 let activeHls = null;
+let activeHlsLevels = [];
 function disposeHls() {
   if (activeHls) {
     try { activeHls.destroy(); } catch (_) {}
     activeHls = null;
   }
+  activeHlsLevels = [];
+  try { window.__onHlsLevels = null; } catch (_) {}
 }
 
 // 懒加载 hls.js（只在需要时）
@@ -560,6 +668,10 @@ async function attachStream(video, data, onError) {
       lowLatencyMode: false,
     });
     activeHls = hls;
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      activeHlsLevels = (hls.levels || []).slice();
+      try { if (typeof window.__onHlsLevels === "function") window.__onHlsLevels(activeHlsLevels); } catch (_) {}
+    });
     hls.on(Hls.Events.ERROR, (_, info) => {
       if (info.fatal) {
         switch (info.type) {
@@ -677,16 +789,24 @@ async function togglePictureInPicture(video) {
   }
 }
 
-// ====== 点按快进 / 快退（触屏 + 鼠标，单击双击分开判断） ======
-// 真机问题（2026-11-07）：① iOS 不触发 dblclick（双击触发缩放），且 video
-// 原生点按会立即暂停/播放——双击的第一下先暂停，快进就出不来；② 点按直接
-// 落在 video 上会弹 iOS 原生控制层（顶部两条栏、底部进度条、中间大暂停键
-// 和两个 ±10 秒键、右下角圆形设置键），挡住画面。
-// 做法：视频上方盖一层 .tap-zone（只盖视频区，底部留 52px 给原生控制条
-//  scrub 用），点按落在它上面，不碰 video 元素本身，原生控制层不会弹出来；
-// 点一下先等 280ms：280ms 内又来一下 = 双击（左 1/3 快退 10 秒、右 1/3
-// 快进 10 秒、中间暂停/播放）；没来第二下 = 单击暂停/播放。
-// 快进/快退只闪 seek-flash 小提示（“快进 10 秒”），不弹大控制层，视频继续播。
+// ====== 手势：长按 2 倍速 / 双击播放暂停 / 单点显隐控制条（触屏 + 鼠标） ======
+// 用户定（2026-11-09；与 B站/腾讯/爱奇艺手机端一致：双击播放/暂停、长按 2 倍速、
+// 松手恢复原速；倍速档 0.5/0.75/1/1.25/1.5/2，1.25 保留）：
+//  - 长按左/右边缘 = 2 倍速快退/快进：按住 250ms 触发；右边缘播放中用
+//    playbackRate=2 平滑走（不反复 seek、不重新缓冲），左边缘没有负倍速、
+//    暂停时右边缘也不改播放状态，改用 250ms 一步 ±0.5 秒连续 seek（=2 倍速）。
+//    松手恢复原倍速/停下。中间长按不做事。
+//  - 双击屏幕任意位置 = 播放/暂停（不分左中右；旧的“双击左/右快进、中间暂停”
+//    映射已删，两套映射并存会冲突）。
+//  - 单点 = 显示/隐藏控制条（锁住时什么都不做）；边缘单点不快进，只有长按才快进。
+//  - 互斥：长按 250ms 与双击窗口 300ms 用定时器互相取消——先触发的赢，
+//    另一个不再触发；长按触发后清掉待确认的单击，长按松手不算一次点按。
+//  - 控制条自动隐藏：播放中 1.5 秒无操作就淡出（.controls-hidden），
+//    单点/点锁图标时短暂出现；暂停时一直显示；锁住时一直藏着；锁图标永不隐藏。
+// 真机旧问题（2026-11-07）：iOS 不触发 dblclick（双击触发缩放），且 video
+// 原生点按会立即暂停/播放；点按直接落在 video 上会弹 iOS 原生控制层。
+// 做法不变：视频上方盖一层 .tap-zone + 左右 .edge-zone，点按落在它们上面，
+// 不碰 video 元素本身，原生控制层不会弹出来。
 let _seekFlashTimer = null;
 function showSeekFlash(wrap, text) {
   let n = wrap.querySelector(".seek-flash");
@@ -694,83 +814,231 @@ function showSeekFlash(wrap, text) {
   n.textContent = text;
   n.classList.add("is-show");
   clearTimeout(_seekFlashTimer);
-  _seekFlashTimer = setTimeout(() => n.classList.remove("is-show"), 700);
+  _seekFlashTimer = setTimeout(() => n.classList.remove("is-show"), 1000);
 }
-// 快进/快退后立刻收起内嵌原生控制条（controls 开关一次，控制条隐藏；
-// 60ms 后恢复 controls，控制条只在用户下次点按视频时再出现）。
-function hideInlineControls(video) {
-  try {
-    if (!video || !video.controls) return;
-    video.controls = false;
-    setTimeout(() => { try { video.controls = true; } catch (_) {} }, 60);
-  } catch (_) {}
-}
-function seekBy(video, wrap, delta) {
+// 10 秒快进/快退按钮已删（2026-11-09 复核后改）：长按 2 倍速手势已完全
+// 覆盖它们的功能。手动跳过片头学习只走 seeked 监听（见 renderPlayer 末尾），
+// 不再经过这里。
+function seek2xStep(video, wrap, delta) {
   if (!video) return;
-  video.currentTime = Math.max(0, video.currentTime + delta);
-  showSeekFlash(wrap, delta > 0 ? "快进 10 秒" : "快退 10 秒");
-  hideInlineControls(video);
+  video.currentTime = Math.max(0, (video.currentTime || 0) + delta);
+  showSeekFlash(wrap, delta > 0 ? "快进 2 倍速" : "快退 2 倍速");
 }
 function bindTapSeek(video, wrap) {
   let zone = wrap.querySelector(".tap-zone");
   if (!zone) { zone = el("div", { class: "tap-zone" }); wrap.append(zone); }
-  let pending = null, pendingX = 0, pendingY = 0;
+  // 边缘快进/快退判定区：一根手指那么大——左右各占视频宽度的 34%（竖屏
+  // 393px 下约 134px，远大于 48px 最小触摸目标），高度覆盖视频主体
+  // （顶部 44px 留给返回键、底部 84px 留给控制条区，不碰这两处）。
+  // 判定区 z-index 4：在 tap-zone(3) 之上、跳过片头按钮(7)之下，字幕层
+  // dual-sub(5)在它们之上但 pointer-events:none 不挡点按。长按只在边缘区
+  // 触发，中间区长按不做事；双击不分区域，任意位置都是播放/暂停。
+  // 左右用“哪个判定区元素接到点按”来分，不用坐标算——旋转 90° 后判定区
+  // 跟着转，元素归属和旧的坐标换算结果一致，横屏也不会错。
+  let edgeL = wrap.querySelector(".edge-zone.edge-left");
+  let edgeR = wrap.querySelector(".edge-zone.edge-right");
+  if (!edgeL) { edgeL = el("div", { class: "edge-zone edge-left" }); wrap.append(edgeL); }
+  if (!edgeR) { edgeR = el("div", { class: "edge-zone edge-right" }); wrap.append(edgeR); }
+
+  const LONG_PRESS_MS = 250;   // 用户定：按住 0.25 秒触发长按（国内常见 300–350ms，用户定 250ms）
+  const DOUBLE_TAP_MS = 300;   // 双击窗口：300ms 内第二下 = 双击
+  const REPEAT_MS = 250;       // 长按连续 seek 步进间隔
+  const REPEAT_STEP = 0.5;     // 每步 0.5 秒：0.5 / 0.25 = 2 倍速
+  const AUTO_HIDE_MS = 1500;   // 用户定：控制条 1.5 秒无操作淡出
+  const MOVE_CANCEL_PX = 24;   // 手指滑动超 24px 就不是点按/长按
+
   const togglePlay = () => {
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   };
-  const doDouble = (x, y) => {
-    const relX = tapRel(x, y).x;
-    if (relX < 0.34) seekBy(video, wrap, -10);
-    else if (relX > 0.66) seekBy(video, wrap, 10);
-    else togglePlay();
+
+  // ---- 控制条自动隐藏（按钮不长时间盖住正片） ----
+  // 控制条在视频下方页面流里，本身不盖画面；但横屏旋转态、跳过片头浮钮、
+  // 横屏退出键、返回键都在画面上，1.5 秒无操作就一起淡出（.controls-hidden），
+  // 单点/点锁图标时再短暂出现。锁图标（.ui-lock-btn）永不隐藏，字幕永不隐藏。
+  const main = wrap.closest(".player-main");
+  const controlsEl = main ? main.querySelector(".player-controls") : null;
+  const isLocked = () => !!main && main.classList.contains("ui-locked");
+  let hideTimer = null;
+  const armAutoHide = () => {
+    clearTimeout(hideTimer); hideTimer = null;
+    if (!main || video.paused || isLocked() || main.classList.contains("controls-hidden")) return;
+    hideTimer = setTimeout(() => { if (!video.paused && !isLocked()) hideControls(); }, AUTO_HIDE_MS);
   };
-  // 点按坐标换算到播放器本地坐标（0~1）。旋转 90° 时 getBoundingClientRect
-  // 是旋转后的外接矩形，直接用 clientX 算左右会错（横屏下双击快进失效，
-  // 2026-11-07 桌面实测：横屏双击只切播放/暂停，竖屏对照 +10 秒正常）。
-  // 用 transform 矩阵的线性部分（只取旋转/缩放，不管位移）把屏幕点换算回
-  // 本地坐标，旋转/不旋转都正确；矩阵不可用时退回原来的简易算法。
-  const tapRel = (x, y) => {
-    const r = wrap.getBoundingClientRect();
-    const w = wrap.offsetWidth || r.width, h = wrap.offsetHeight || r.height;
-    const tf = getComputedStyle(wrap).transform;
-    if (tf && tf !== "none" && typeof DOMMatrixReadOnly !== "undefined" && typeof DOMPoint !== "undefined") {
-      try {
-        const m = new DOMMatrixReadOnly(tf);
-        const rot = new DOMMatrix([m.a, m.b, m.c, m.d, 0, 0]);
-        const p = new DOMPoint(x - (r.left + r.width / 2), y - (r.top + r.height / 2)).matrixTransform(rot.inverse());
-        return { x: (p.x + w / 2) / w, y: (p.y + h / 2) / h };
-      } catch (_) { /* 掉到下面的简易算法 */ }
-    }
-    return { x: (x - r.left) / Math.max(1, r.width), y: (y - r.top) / Math.max(1, r.height) };
+  const showControls = () => {
+    if (!main || isLocked()) return;
+    main.classList.remove("controls-hidden");
+    armAutoHide();
   };
-  // 2026-11-07 真机反馈：双击快进点不了——手指两次落点常差 60px 以上，
-  // 旧逻辑按像素距离判双击就失效（变成两次单击=暂停）。改按“两次点在
-  // 同一个三分区（左/中/右）”判双击，手指漂移也不怕；窗口放宽到 350ms。
-  const thirdOf = (x, y) => {
-    const relX = tapRel(x, y).x;
-    return relX < 0.34 ? 0 : relX > 0.66 ? 2 : 1;
+  const hideControls = () => {
+    if (!main) return;
+    main.classList.add("controls-hidden");
+    clearTimeout(hideTimer); hideTimer = null;
   };
-  const onTap = (x, y) => {
-    if (pending) {
-      clearTimeout(pending); pending = null;
-      if (thirdOf(x, y) === thirdOf(pendingX, pendingY)) { doDouble(x, y); return; }
-    }
-    pendingX = x; pendingY = y;
-    pending = setTimeout(() => { pending = null; togglePlay(); }, 350);
+  const pokeControls = () => {
+    if (!main || isLocked() || main.classList.contains("controls-hidden")) return;
+    armAutoHide();
   };
-  let lastTouchEnd = 0;
-  zone.addEventListener("touchend", (ev) => {
-    ev.preventDefault(); // 阻止合成 click 与 iOS 双击缩放
-    if (!ev.changedTouches || !ev.changedTouches.length) return;
-    const t = ev.changedTouches[0];
-    lastTouchEnd = Date.now();
-    onTap(t.clientX, t.clientY);
-  }, { passive: false });
-  zone.addEventListener("click", (ev) => {
-    if (Date.now() - lastTouchEnd < 600) return; // 触屏合成的 click，忽略
-    onTap(ev.clientX, ev.clientY);
+  video.addEventListener("play", armAutoHide);
+  video.addEventListener("pause", () => {
+    clearTimeout(hideTimer); hideTimer = null;
+    // 锁住时不移除 controls-hidden：锁住就是要让按钮一直藏着，
+    // 暂停也不该把它放出来（.ui-locked 的 display:none 还盖着，
+    // 但状态要一致，不然解锁后行为会乱）。
+    if (main && !isLocked()) main.classList.remove("controls-hidden");
   });
+  if (controlsEl) {
+    controlsEl.addEventListener("pointerdown", pokeControls);
+    controlsEl.addEventListener("click", pokeControls);
+  }
+  // 锁开关在 bindTapSeek 之后才创建，直接监听不到；只看 ui-locked 的变化，
+  // 不看 controls-hidden（否则显隐切换会自己触发自己、来回乒乓）。
+  let wasLocked = isLocked();
+  if (main && typeof MutationObserver !== "undefined") {
+    new MutationObserver(() => {
+      const locked = isLocked();
+      if (locked === wasLocked) return;
+      wasLocked = locked;
+      if (locked) { clearTimeout(hideTimer); hideTimer = null; }
+      else showControls();
+    }).observe(main, { attributes: true, attributeFilter: ["class"] });
+  }
+  armAutoHide();
+
+  // ---- 手势状态机：一次操作只触发一个动作 ----
+  let pendingTapTimer = null; // 待确认的单击：等 300ms 看有没有第二下
+  let lpTimer = null, lpInterval = null, lpSide = null, lpFired = false;
+  let lpStartX = 0, lpStartY = 0, lpStartTime = 0, lpMoved = false, lpSavedRate = 1;
+
+  const doSingleTap = () => {
+    if (isLocked()) return; // 锁住时单点什么都不做，按钮继续藏着
+    if (!main) return;
+    if (main.classList.contains("controls-hidden")) showControls();
+    else hideControls();
+  };
+
+  const fireLongPress = () => {
+    lpTimer = null;
+    if (lpMoved) return;
+    // 长按赢了：待确认的单击作废——双击的第一下不能在长按后补一个暂停/显隐。
+    clearTimeout(pendingTapTimer); pendingTapTimer = null;
+    lpFired = true;
+    lpStartTime = video.currentTime || 0;
+    video._suppressSkipLearn = true; // 长按期间逐次 seek 不记学习样本
+    if (lpSide === "right" && !video.paused) {
+      // 播放中正向：原生 playbackRate=2 最平滑，不反复 seek、不重新缓冲。
+      lpSavedRate = video.playbackRate || 1;
+      try { video.playbackRate = 2; } catch (_) {}
+      showSeekFlash(wrap, "快进 2 倍速");
+      // 闪字 1 秒就消失，长按期间每 800ms 补闪一次，让它一直看得见。
+      lpInterval = setInterval(() => showSeekFlash(wrap, "快进 2 倍速"), 800);
+    } else {
+      // 反向没有负倍速；暂停时正向也不改播放状态：250ms 一步 ±0.5 秒连续 seek。
+      const delta = lpSide === "right" ? REPEAT_STEP : -REPEAT_STEP;
+      seek2xStep(video, wrap, delta);
+      lpInterval = setInterval(() => seek2xStep(video, wrap, delta), REPEAT_MS);
+    }
+  };
+  const endLongPress = () => {
+    clearTimeout(lpTimer); lpTimer = null;
+    clearInterval(lpInterval); lpInterval = null;
+    if (!lpFired) return false;
+    lpFired = false;
+    // 松手恢复原速/停下。
+    if (lpSide === "right" && !video.paused) {
+      try { video.playbackRate = lpSavedRate || 1; } catch (_) {}
+    }
+    // 长按整段只记一个学习样本：按住时的位置 → 松手时的位置（向前 >=10 秒、
+    // 落点 10–180 秒才记，recordManualSkip 内部再按 ±5 秒/3 次扶正）。
+    try {
+      const to = video.currentTime || 0;
+      if (video._skipCtx && to - lpStartTime >= 10) recordManualSkip(video._skipCtx.bid, video._skipCtx.plugin, lpStartTime, to);
+    } catch (_) {}
+    // seeked 事件可能晚于 touchend 才触发，抑制标志多留 400ms 再清。
+    setTimeout(() => { video._suppressSkipLearn = false; }, 400);
+    return true;
+  };
+
+  const onPressStart = (side, x, y) => {
+    lpSide = side; lpMoved = false; lpStartX = x; lpStartY = y;
+    clearTimeout(lpTimer); lpTimer = null;
+    // 只有边缘区才设长按定时器；中间区按住再久也不触发长按。
+    if (side === "left" || side === "right") lpTimer = setTimeout(fireLongPress, LONG_PRESS_MS);
+    pokeControls();
+  };
+  const onPressMove = (x, y) => {
+    if (Math.abs(x - lpStartX) > MOVE_CANCEL_PX || Math.abs(y - lpStartY) > MOVE_CANCEL_PX) {
+      lpMoved = true;
+      clearTimeout(lpTimer); lpTimer = null;
+    }
+  };
+  const onPressEnd = () => {
+    clearTimeout(lpTimer); lpTimer = null;
+    if (lpFired) { endLongPress(); return; } // 长按松手：不算点按，不触发单击/双击
+    if (lpMoved) return; // 滑动：不算点按
+    // 短点按：等 300ms 看有没有第二下。
+    if (pendingTapTimer) {
+      clearTimeout(pendingTapTimer); pendingTapTimer = null;
+      togglePlay(); // 双击屏幕任意位置 = 播放/暂停
+      pokeControls();
+      return;
+    }
+    pendingTapTimer = setTimeout(() => { pendingTapTimer = null; doSingleTap(); }, DOUBLE_TAP_MS);
+  };
+  const onPressCancel = () => {
+    clearTimeout(lpTimer); lpTimer = null;
+    if (lpFired) endLongPress();
+  };
+
+  let lastTouchEnd = 0;
+  let mouseDown = false;
+  const bindTapTarget = (target, side) => {
+    target.addEventListener("touchstart", (ev) => {
+      if (!ev.changedTouches || !ev.changedTouches.length) return;
+      const t = ev.changedTouches[0];
+      onPressStart(side, t.clientX, t.clientY);
+    }, { passive: true });
+    target.addEventListener("touchmove", (ev) => {
+      if (!ev.changedTouches || !ev.changedTouches.length) return;
+      const t = ev.changedTouches[0];
+      onPressMove(t.clientX, t.clientY);
+    }, { passive: true });
+    target.addEventListener("touchend", (ev) => {
+      ev.preventDefault(); // 阻止合成 click 与 iOS 双击缩放
+      ev.stopPropagation();
+      lastTouchEnd = Date.now();
+      onPressEnd();
+    }, { passive: false });
+    target.addEventListener("touchcancel", () => { onPressCancel(); }, { passive: true });
+    target.addEventListener("mousedown", (ev) => {
+      mouseDown = true;
+      onPressStart(side, ev.clientX, ev.clientY);
+    });
+    target.addEventListener("mousemove", (ev) => { if (mouseDown) onPressMove(ev.clientX, ev.clientY); });
+    target.addEventListener("mouseup", () => {
+      if (!mouseDown) return;
+      mouseDown = false;
+      onPressEnd();
+    });
+    // 按住拖出元素外再松手：target 收不到 mouseup，用 mouseleave 兜底取消，
+    // 否则长按的 2 倍速/连续 seek 会一直走下去停不下来。
+    target.addEventListener("mouseleave", () => {
+      if (!mouseDown) return;
+      mouseDown = false;
+      onPressCancel();
+    });
+    // 长按还会触发浏览器的 contextmenu（尤其安卓）：禁掉，不让菜单盖住画面。
+    target.addEventListener("contextmenu", (ev) => { ev.preventDefault(); });
+    target.addEventListener("click", (ev) => {
+      // 点按已在 touchend/mouseup 里处理，click 只拦冒泡、不再触发任何动作，
+      // 否则一次点按会触发两次（桌面端 mouseup + click 各一次）。
+      ev.stopPropagation();
+      ev.preventDefault();
+    });
+  };
+  bindTapTarget(zone, "middle");
+  bindTapTarget(edgeL, "left");
+  bindTapTarget(edgeR, "right");
 }
 
 // ====== 一键横屏 ======
@@ -900,28 +1168,28 @@ async function renderPlayer(params) {
   let resolveMs = 0;
   const resolveStart = performance.now();
   try {
-    data = await fetchJson("/api/resolve?plugin=" + encodeURIComponent(plugin) + "&episodeUrl=" + encodeURIComponent(episodeUrl));
+    // 解析 20 秒超时：一次 504 不能拖 35 秒；超时按解析失败走自动换源。
+    const rc = new AbortController();
+    const rt = setTimeout(() => rc.abort(), 20000);
+    let rres;
+    try { rres = await fetch("/api/resolve?plugin=" + encodeURIComponent(plugin) + "&episodeUrl=" + encodeURIComponent(episodeUrl), { signal: rc.signal }); }
+    finally { clearTimeout(rt); }
+    if (!rres.ok) throw new Error("HTTP " + rres.status + ": " + rres.statusText);
+    data = await rres.json();
     resolveMs = Math.round(performance.now() - resolveStart);
     try {
       const lat = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {};
       lat[plugin] = resolveMs;
       localStorage.setItem("pluginLatency", JSON.stringify(lat));
     } catch (_) {}
-    // 解析成功：清除该源的失败记录，下次自动选源不再跳过它。
-    try {
-      const fails = JSON.parse(localStorage.getItem("pluginParseFail") || "{}") || {};
-      if (fails[plugin] != null) { delete fails[plugin]; localStorage.setItem("pluginParseFail", JSON.stringify(fails)); }
-    } catch (_) {}
+    // 解析成功：清除该源的失败记录（会话内 + 24h），下次自动选源不再跳过它。
+    clearPluginParseFailed(plugin);
   } catch (e) {
     // 这个源解析失败（比如 AGE 某条目 20 秒超时 504）：记下失败时间，
     // 24 小时内自动选源不再首选它（MXdm 检索最快但解析次次 504，
     // 再首选它只会白等 20 秒）。再自动换别的源试同一集，
     // 不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
-    try {
-      const fails = JSON.parse(localStorage.getItem("pluginParseFail") || "{}") || {};
-      fails[plugin] = Date.now();
-      localStorage.setItem("pluginParseFail", JSON.stringify(fails));
-    } catch (_) {}
+    markPluginParseFailed(plugin);
     // 同一集，不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
     // fb 记录已试过的源，防止 AGE→MXdm→AGE 来回跳。
     const tried = new Set((params.fb || "").split(",").filter(Boolean).concat([plugin]));
@@ -933,8 +1201,22 @@ async function renderPlayer(params) {
       const plugins = await fetchJson("/api/plugins");
       let latMap = {};
       try { latMap = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {}; } catch (_) {}
-      const ordered = plugins.slice().sort((a, b) => (latMap[a.name] == null ? 1e9 : latMap[a.name]) - (latMap[b.name] == null ? 1e9 : latMap[b.name]));
-      for (const p of ordered) {
+      // 换源循环也要查 24h/会话内失败黑名单（原来只按延迟排，刚失败的源
+      // 搜得快还会排前面再失败一次），干净源优先。
+      let clean = { clean: {}, dirty: [] };
+      try { clean = await loadCleanSources(); } catch (_) {}
+      // 优先未失败源，全部都失败过时才放宽（与 autoPlayBangumi 同一规则）。
+      const _orderedAll = orderPluginsCleanFirst(plugins, clean, seriesName, bid)
+        .sort((a, b) => {
+          const ca = (clean.clean && clean.clean[a.name]) ? 0 : 1;
+          const cb = (clean.clean && clean.clean[b.name]) ? 0 : 1;
+          return (ca - cb) || ((latMap[a.name] == null ? 1e9 : latMap[a.name]) - (latMap[b.name] == null ? 1e9 : latMap[b.name]));
+        });
+      const _fresh = _orderedAll.filter((p) => !pluginFailedRecently(p.name));
+      const orderedFinal = _fresh.length ? _fresh : _orderedAll;
+      // 用 orderedFinal 替代 ordered 继续走下面的循环
+      const ordered2 = orderedFinal;
+      for (const p of ordered2) {
         if (tried.has(p.name)) continue;
         hadOthers = true;
         let items = [];
@@ -971,7 +1253,11 @@ async function renderPlayer(params) {
   page.append(el("div", { class: "player-layout" }, main, panel));
   const seriesTitle = (title || "").split(" · ").slice(0, -1).join(" · ") || title || "";
 
-  const video = el("video", { controls: true, playsinline: true, "webkit-playsinline": true, preload: "metadata" });
+  // controls:false：浏览器原生控制条暂停时会盖住烧进画面的中文硬字幕下半行，
+  // 且站里没有任何 ::cue/原生控制条样式能给它让位。改由页面自绘控件 +
+  // tap-zone（已扩到全幅）+ 大播放按钮管播放/暂停；另加 ::cue 样式（styles.css）
+  // 管全屏原生字幕轨。tap-zone 的手势（长按 2 倍速、双击播放/暂停、单点显隐控制条）、键盘空格、大播放按钮都不变。
+  const video = el("video", { controls: false, playsinline: true, "webkit-playsinline": true, preload: "metadata" });
   const playerWrap = el("div", { class: "player-wrap" }, video);
   main.append(playerWrap);
 
@@ -1017,15 +1303,92 @@ async function renderPlayer(params) {
   video.style.objectFit = initialFit;
   fitSelect.addEventListener("change", () => { video.style.objectFit = fitSelect.value; savePrefs({ fit: fitSelect.value }); });
 
+  // 播放/暂停按钮：controls:false 后页面上必须有一个明确的播放/暂停入口，
+  // 不能只靠点按视频——竖屏时 tap-zone 只覆盖视频主体（top:44px/bottom:84px，
+  // 上下留给返回键和控制条区；横屏旋转态才铺满全幅，见 styles.css），
+  // 按钮仍是无障碍与桌面端的兜底。
+  const playPauseBtn = button("暂停", { variant: "text", icon: "pause", onclick: () => {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  } });
+  const syncPlayPauseBtn = () => {
+    const l = playPauseBtn.querySelector(".label");
+    if (l) l.textContent = video.paused ? "播放" : "暂停";
+  };
+  video.addEventListener("play", syncPlayPauseBtn);
+  video.addEventListener("pause", syncPlayPauseBtn);
+  // 控制条主排（2026-11-09 复核后改）：只留 7 个固定项——播放/暂停、
+  // 上一集、下一集、倍速、跳过片头、横屏、更多，行宽从加载时就定死。
+  // 画质/字幕/画面比例/重新解析/画中画移进“更多”菜单：之前它们是事后
+  // 追加或按需出现（display:none ↔ 显示），开播后会把后面的按钮向右顶
+  // 约 90–110px，按钮位置在播起来之后才变。快退/快进 10 秒按钮已删
+  // （长按 2 倍速已覆盖）；控制条里的“锁按钮”已删（角落常驻锁图标
+  // 才是用户要的入口，两个锁重复）。
+  const moreMenu = el("div", { class: "player-more-menu" });
+  const moreBtn = button("更多", { variant: "text", onclick: (ev) => {
+    if (ev) ev.stopPropagation();
+    moreMenu.classList.toggle("is-open");
+  } });
   const reload = button("重新解析", { variant: "text", icon: "refresh", onclick: () => renderPlayer(params) });
-  const back10Btn = button("快退 10 秒", { variant: "text", onclick: () => seekBy(video, playerWrap, -10) });
-  const fwd10Btn = button("快进 10 秒", { variant: "text", onclick: () => seekBy(video, playerWrap, 10) });
   const landscapeBtn = button("横屏", { variant: "text", onclick: () => toggleLandscape(video, playerWrap, landscapeBtn) });
-  const controls = el("div", { class: "player-controls" }, prevBtn, nextBtn, rateSelect, fitSelect, reload, back10Btn, fwd10Btn, landscapeBtn);
-  if (pipSupported(video)) {
-    controls.append(button("画中画", { variant: "text", icon: "picture_in_picture", onclick: () => togglePictureInPicture(video) }));
+  // 画质下拉（仅 hls.js 分支）：MANIFEST_PARSED 后读 hls.levels 生成；
+  // 单码率（levels<=1）或 Safari 原生 HLS 时隐藏（原生无 JS 画质接口）。
+  const qualitySelect = el("select", { class: "btn btn-tonal", "aria-label": "画质" });
+  qualitySelect.style.display = "none";
+  const populateQuality = (levels) => {
+    qualitySelect.innerHTML = "";
+    if (!levels || levels.length <= 1 || nativeHlsSupported(video)) { qualitySelect.style.display = "none"; return; }
+    const auto = el("option", { value: "-1" }, "画质 自动");
+    auto.setAttribute("selected", "");
+    qualitySelect.append(auto);
+    levels.forEach((lv, i) => {
+      qualitySelect.append(el("option", { value: String(i) }, "画质 " + (lv.height ? lv.height + "p" : "档位 " + (i + 1))));
+    });
+    qualitySelect.style.display = "";
+  };
+  qualitySelect.addEventListener("change", () => {
+    const idx = parseInt(qualitySelect.value, 10);
+    if (activeHls) { try { activeHls.nextLevel = Number.isNaN(idx) ? -1 : idx; } catch (_) {} }
+  });
+  window.__onHlsLevels = populateQuality;
+  populateQuality(activeHlsLevels);
+  // 自动跳过片头开关：默认关（false），记在 playerPrefs；只在有正式 introEnd
+  // 的番上生效，没标定的番不跳。开关在控制行随时能关。
+  const skipToggleBtn = button("跳过片头：关", { variant: "text", onclick: () => {
+    const v = !prefs.autoSkipIntro;
+    savePrefs({ autoSkipIntro: v });
+    const l = skipToggleBtn.querySelector(".label");
+    if (l) l.textContent = "跳过片头：" + (v ? "开" : "关");
+    toast(v ? "自动跳过片头已开（仅已标定片头的番）" : "自动跳过片头已关");
+  } });
+  if (prefs.autoSkipIntro) {
+    const l = skipToggleBtn.querySelector(".label");
+    if (l) l.textContent = "跳过片头：开";
   }
-  main.append(controls);
+  // 锁按钮（控制条里那个）已删：角落常驻锁图标才是入口，见 renderPlayer 末尾的 setUiLock/lockIcon。
+  const controls = el("div", { class: "player-controls" }, playPauseBtn, prevBtn, nextBtn, rateSelect, skipToggleBtn, landscapeBtn, moreBtn);
+  if (pipSupported(video)) {
+    moreMenu.append(button("画中画", { variant: "text", icon: "picture_in_picture", onclick: () => togglePictureInPicture(video) }));
+  }
+  moreMenu.append(fitSelect, qualitySelect, reload);
+  // 右侧滚动提示：竖屏 393px 下主排仍可能超出，一排滑不动时用户不知道
+  // 后面还有按钮；“›”只在还能往右滑时出现，滑到底就消失。
+  const scrollHint = el("span", { class: "controls-scroll-hint is-hidden", "aria-hidden": "true" }, "›");
+  const controlsWrap = el("div", { class: "player-controls-wrap" }, controls, scrollHint);
+  main.append(controlsWrap, moreMenu);
+  const updateScrollHint = () => {
+    try { scrollHint.classList.toggle("is-hidden", controls.scrollWidth - controls.clientWidth - controls.scrollLeft <= 8); } catch (_) {}
+  };
+  controls.addEventListener("scroll", updateScrollHint, { passive: true });
+  // resize 监听只挂一次（每次进播放页都挂会越积越多）：存当前这页的
+  // updateScrollHint，旧页面的闭包不再被调。
+  window.__updateControlsHint = updateScrollHint;
+  if (!window.__controlsHintResizeBound) {
+    window.__controlsHintResizeBound = true;
+    window.addEventListener("resize", () => { try { if (window.__updateControlsHint) window.__updateControlsHint(); } catch (_) {} });
+  }
+  updateScrollHint();
+  setTimeout(updateScrollHint, 300); // 布局完成后再复查一次（刚建好时 clientWidth 可能还是 0）
   bindPlayerKeys(video);
   bindTapSeek(video, playerWrap);
   bindNativeFullscreenGuard(video, playerWrap, landscapeBtn);
@@ -1080,7 +1443,8 @@ async function renderPlayer(params) {
     toast(subSelect.value === dualSub.dualMode ? "已切换" + dualSub.dualLabel + "字幕（" + (dualSub.ovlLang === "en" ? "英文" : "日文") + "叠加 + 画面中文字幕）"
       : subSelect.value === "zh" ? "仅中文：只看画面自带中文字幕" : "字幕已关");
   });
-  controls.append(subSelect);
+  // 字幕下拉也进“更多”菜单，不占主排宽度；有字幕文件时才出现（见 showSubUI）。
+  moreMenu.append(subSelect);
   let subUIHandled = false;
   const showSubUI = () => {
     if (subUIHandled || !dualSub.done) return;
@@ -1240,6 +1604,116 @@ async function renderPlayer(params) {
   };
   if (video.readyState >= 1) tryAutoplay();
   else video.addEventListener("loadedmetadata", tryAutoplay, { once: true });
+
+  // ====== 跳过片头（只做片头；片尾不做） ======
+  // 防冲突/点不到/卡顿/干扰的要点（用户硬要求，逐项落实）：
+  //  - 按钮 z-index 7（styles.css .skip-intro-btn），高于 tap-zone(3) 与
+  //    dual-sub(5)，与 seek-flash/big-play 同级；点按 stopPropagation，
+  //    不会被 bindTapSeek 的 touchend 吞掉变成暂停/快进；min-height 48px，
+  //    只在片头窗口内出现，其余时间隐藏。
+  //  - 自动跳只在从头开始（续播位置 <5 秒）且本集只跳一次时生效，跳完记
+  //    skippedOnce；撤回后本集不再自动跳；不和断点续播 doSeek、tryAutoplay、
+  //    长按快进抢 currentTime；手动按钮与自动跳调同一个 seekIntro()。
+  //  - 不加逐帧检测、不加 requestAnimationFrame；跳点判断只用现成的
+  //    timeupdate（约 4Hz）与 loadedmetadata；学习记录只在手动 seek 时写一次。
+  //  - 按钮放右下角、bottom 96px（原生控制条上方），不盖字幕主行；自动跳
+  //    提示条约 5 秒带撤回，过期自动消失，不常驻。
+  video._skipCtx = { bid: bid ? parseInt(bid, 10) : null, plugin };
+  let skipIntroEnd = null, skipIntroSource = "", skipDoneThisEp = false, skipPreTime = 0;
+  let skipPillTimer = null;
+  const showSkipPill = (fromSec, toSec) => {
+    let pill = playerWrap.querySelector(".skip-pill");
+    if (pill) pill.remove();
+    pill = el("div", { class: "skip-pill" },
+      el("span", {}, "已跳过片头 " + fmtSkipTime(fromSec) + " → " + fmtSkipTime(toSec)),
+      el("button", { type: "button", onclick: (ev) => {
+        ev.stopPropagation();
+        try { video.currentTime = skipPreTime; } catch (_) {}
+        skipDoneThisEp = true; // 撤回后本集不再自动跳
+        if (pill) pill.remove();
+        clearTimeout(skipPillTimer);
+      } }, "撤回"));
+    pill.addEventListener("click", (ev) => ev.stopPropagation());
+    pill.addEventListener("touchend", (ev) => ev.stopPropagation(), { passive: true });
+    playerWrap.append(pill);
+    clearTimeout(skipPillTimer);
+    skipPillTimer = setTimeout(() => { if (pill) pill.remove(); }, 5000);
+  };
+  const seekIntro = (fromAuto) => {
+    if (skipIntroEnd == null || skipDoneThisEp) return false;
+    skipPreTime = video.currentTime || 0;
+    skipDoneThisEp = true;
+    try { video.currentTime = skipIntroEnd; } catch (_) { return false; }
+    showSkipPill(skipPreTime, skipIntroEnd);
+    return true;
+  };
+  const skipBtn = el("button", { class: "skip-intro-btn", type: "button" }, "跳过片头");
+  skipBtn.style.display = "none";
+  skipBtn.addEventListener("click", (ev) => { ev.stopPropagation(); seekIntro(false); });
+  skipBtn.addEventListener("touchend", (ev) => { ev.stopPropagation(); seekIntro(false); }, { passive: true });
+  playerWrap.append(skipBtn);
+  // 角落小锁图标：锁住时唯一留在画面上的按钮，点一下就解锁（不误触：
+  // 它在右上角 48px，远离中间的点按区和右下角的跳过片头浮钮；锁住时
+  // 控制条、跳过片头浮钮、横屏退出键、大播放按钮都藏起来，画面干净，
+  // 手势（边缘长按 2 倍速快进快退、双击播放/暂停）照常走。状态记 playerPrefs.uiLock，
+  // 下次打开还记得；横屏竖屏都一样（图标在 playerWrap 里，跟着旋转走）。
+  const setUiLock = (v) => {
+    prefs.uiLock = !!v;
+    savePrefs({ uiLock: prefs.uiLock });
+    main.classList.toggle("ui-locked", prefs.uiLock);
+    lockIcon.textContent = prefs.uiLock ? "🔒" : "🔓";
+  };
+  const lockIcon = el("button", { class: "ui-lock-btn", type: "button", "aria-label": "锁按钮", title: "锁按钮：点一下隐藏/显示按钮" }, prefs.uiLock ? "🔒" : "🔓");
+  // 锁图标点一次只翻一次：click 和 touchend 都会触发，500ms 内去重，
+  // 不然一次点按翻两次等于没反应（skipBtn 不怕这个，它有 skipDoneThisEp
+  // 幂等 guard；setUiLock 没有，所以这里必须去重）。
+  let lastLockTap = 0;
+  const toggleUiLock = () => {
+    const now = Date.now();
+    if (now - lastLockTap < 500) return;
+    lastLockTap = now;
+    setUiLock(!prefs.uiLock);
+  };
+  lockIcon.addEventListener("click", (ev) => { ev.stopPropagation(); toggleUiLock(); });
+  lockIcon.addEventListener("touchend", (ev) => { ev.stopPropagation(); ev.preventDefault(); toggleUiLock(); }, { passive: false });
+  playerWrap.append(lockIcon);
+  if (prefs.uiLock) main.classList.add("ui-locked");
+  // 原生进度条拖动的学习：programmaticSeek 为 true 时是 doSeek/自动跳/
+  // 按钮 seek，不记；否则是从 <60 秒出发、向前 >=10 秒、落点 10–180 秒的手动跳。
+  let programmaticSeek = true, seekFrom = 0, lastStableTime = 0;
+  setTimeout(() => { programmaticSeek = false; }, 1500);
+  video.addEventListener("timeupdate", () => { if (!video.seeking) lastStableTime = video.currentTime || 0; });
+  video.addEventListener("seeked", () => {
+    const to = video.currentTime || 0;
+    if (!programmaticSeek && video._skipCtx && !video._suppressSkipLearn) recordManualSkip(video._skipCtx.bid, video._skipCtx.plugin, lastStableTime, to);
+  });
+  // 续播 doSeek 与自动跳都走 programmatic：setup 时立即置 true 1500ms，
+  // 盖住开播时 doSeek 的那次 seek（loadedmetadata 可能在 setup 前已触发，
+  // 只靠 loadedmetadata 监听盖不住）；1500ms 后恢复，之后的手动拖动才记学习样本。
+  effectiveIntroEnd(bid, plugin).then((row) => {
+    if (!row) return; // 没正式跳点：不显示按钮、不自动跳、不猜秒数
+    skipIntroEnd = row.introEnd;
+    skipIntroSource = row.source;
+    // 手动按钮只在片头窗口内出现
+    video.addEventListener("timeupdate", () => {
+      if (skipDoneThisEp) { skipBtn.style.display = "none"; return; }
+      skipBtn.style.display = (video.currentTime || 0) < skipIntroEnd ? "" : "none";
+    });
+    // 自动跳：开关开 + 从头开始（无断点或断点 <5 秒）+ 本集未跳过。
+    // 注册在 loadedmetadata 上，排在续播 doSeek 之后（doSeek 先注册），
+    // 所以不会把续播位置拉回片头。
+    const trySkipAuto = () => {
+      if (!prefs.autoSkipIntro || skipDoneThisEp || skipIntroEnd == null) return;
+      const t = video.currentTime || 0;
+      if (t >= 5) return; // 断点续播（>=5 秒）不跳
+      if (t >= skipIntroEnd) return;
+      programmaticSeek = true;
+      seekIntro(true);
+      setTimeout(() => { programmaticSeek = false; }, 500);
+    };
+    if (video.readyState >= 1) trySkipAuto();
+    else video.addEventListener("loadedmetadata", trySkipAuto, { once: true });
+  }).catch(() => {});
 }
 
 // 离开播放页时销毁 hls.js + 弹幕 + 进度上报

@@ -20,6 +20,22 @@ It does two things:
           Also warms the next episode (ep+1) so the cache stays ahead.
      GET  /api/subs/status/<bid>/ep<NN>   -> {status, source, ...}
      GET  /api/subs/health                -> {ok, cache, groq, jimaku, ...}
+3. Skip-point reports (handled locally, never proxied):
+     POST /api/skip-points/report   {key, bid, plugin, introEnd, samples,
+                                     source, count}
+          Append-only. Stores the report in subs/skip-reports.json for
+          Mika to review before writing the official web/skip-points.json.
+          It NEVER writes the official table, NEVER installs/deletes a
+          rule, NEVER changes playback. Invalid bodies get 400.
+     GET  /api/skip-points/reports  -> {count, reports:[...]}
+          Read-only list for Mika's review (container-local file; pull
+          it before redeploy, the container filesystem does not survive).
+     GET  /api/skip-points/learned  -> {points: {key: {introEnd, source, count}}}
+          Read-only aggregate of reported points with count>=3 (latest
+          report wins per key). The player fetches this at startup as a
+          third introEnd source (after local skipPromoted + static
+          skip-points.json) so a point learned on one device works on
+          another without waiting for Mika to write the official table.
 2. Everything else is reverse-proxied to the KazumiWeb binary on
    127.0.0.1:10001 (SUBS_UPSTREAM), streaming, with Range support,
    so video playback is unaffected.
@@ -77,6 +93,52 @@ HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "te", "trailer",
               "transfer-encoding"}
 
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Skip-point reports: append-only review queue (see module docstring).
+# Container-local; Mika pulls it via GET /api/skip-points/reports.
+SKIP_REPORTS_FILE = os.path.join(HERE, "skip-reports.json")
+SKIP_REPORTS_MAX = 200
+_skip_lock = threading.Lock()
+
+
+def _load_skip_reports():
+    try:
+        with open(SKIP_REPORTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _append_skip_report(entry):
+    with _skip_lock:
+        reports = _load_skip_reports()
+        reports.append(entry)
+        reports = reports[-SKIP_REPORTS_MAX:]
+        tmp = SKIP_REPORTS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, SKIP_REPORTS_FILE)
+        return len(reports)
+
+
+def _learned_skip_points():
+    # 聚合已上报且 count>=3 的 learned 点：同一 key 以最新上报为准；
+    # 只读，不写正式表。播放页当第三来源读回，跨设备共享。
+    points = {}
+    for r in _load_skip_reports():
+        try:
+            if int(r.get("count") or 0) < 3:
+                continue
+            key = str(r.get("key") or "")
+            intro = int(r.get("introEnd"))
+            if not key or not 10 <= intro <= 180:
+                continue
+            points[key] = {"introEnd": intro, "source": "learned",
+                           "count": int(r.get("count") or 0)}
+        except (TypeError, ValueError):
+            continue
+    return points
 
 # ------------------------------------------------------------------ state
 _status = {}            # (bid, ep, lang) -> dict(status, source, updated)
@@ -503,6 +565,50 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    # -- skip-point reports (review queue only) ----------------------
+    def _handle_skip_points(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path == "/api/skip-points/report" and self.command == "POST":
+            body = self._read_json_body()
+            try:
+                bid = str(body.get("bid", ""))
+                plugin = str(body.get("plugin", ""))
+                intro_end = int(body.get("introEnd"))
+                samples = body.get("samples") or []
+                count = int(body.get("count") or 0)
+            except (TypeError, ValueError):
+                self._send_json(400, {"error": "bad report body"})
+                return True
+            # introEnd 只在片头时段内才合理；samples 必须是秒数列表
+            if (not bid or not bid.isdigit() or not plugin or len(plugin) > 64
+                    or not 10 <= intro_end <= 180
+                    or not isinstance(samples, list)
+                    or not all(isinstance(s, (int, float)) and 10 <= s <= 180 for s in samples)):
+                self._send_json(400, {"error": "bad report body"})
+                return True
+            entry = {
+                "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "key": str(body.get("key") or (bid + "|" + plugin)),
+                "bid": bid,
+                "plugin": plugin,
+                "introEnd": intro_end,
+                "samples": [int(s) for s in samples][-20:],
+                "source": str(body.get("source") or "learned"),
+                "count": count,
+            }
+            n = _append_skip_report(entry)
+            self._send_json(200, {"status": "received", "stored": n})
+            return True
+        if path == "/api/skip-points/reports" and self.command == "GET":
+            reports = _load_skip_reports()
+            self._send_json(200, {"count": len(reports), "reports": reports})
+            return True
+        if path == "/api/skip-points/learned" and self.command == "GET":
+            self._send_json(200, {"points": _learned_skip_points()})
+            return True
+        return False
+
     # -- reverse proxy -------------------------------------------------
     def _handle_proxy(self):
         url = UPSTREAM + self.path
@@ -567,11 +673,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/subs/"):
             if self._handle_subs():
                 return
+        if self.path.startswith("/api/skip-points/"):
+            if self._handle_skip_points():
+                return
         self._handle_proxy()
 
     def do_POST(self):
         if self.path.startswith("/api/subs/"):
             if self._handle_subs():
+                return
+        if self.path.startswith("/api/skip-points/"):
+            if self._handle_skip_points():
                 return
         self._handle_proxy()
 

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "note": "正式跳点表（服务端共享，手机与 VM 共用）：只含 introEnd（秒），片尾不做。来源 measured=Mika 预先实测标定（看第1集，片头曲结束、正片第一句对白/第一个正片镜头出现的秒数，同一季通用，换 OP 重标；字幕可辅助：OP 歌词结束、对白开始就是点）；learned=用户手动跳的落点在 ±5 秒内出现 3 次以上后扶正（覆盖 measured）。learned 点跨设备共享：用户在任何设备上扶正后先存本机并上报 /api/skip-points/report（审核队列），播放页经 GET /api/skip-points/learned 读回当第三来源（本机扶正 > 本表 > 服务端 learned），不用等写表；Mika 审核后写进本表才算正式。表里没写的番不自动跳，不猜秒数。不用黑帧/静音自动检测（吞噬星空开头约 20 秒本身就是黑底 AXIS 卡，会误判）。",
+  "points": {},
+  "candidates": {}
+}

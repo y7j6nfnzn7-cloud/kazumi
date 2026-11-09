@@ -203,10 +203,10 @@ svg { fill: currentColor; flex-shrink: 0; }
 }
 .nav-item .icon { width: 24px; height: 24px; display: inline-flex; }
 .nav-item .icon svg { width: 24px; height: 24px; }
-.nav-item .label { display: none; }
+.nav-item .label { display: block; font-size: 11px; line-height: 1.2; }
 .nav-item.is-active { color: var(--on-secondary-container); }
 .nav-item.is-active .nav-indicator { background: var(--secondary-container); }
-.nav-item.is-active .label { display: block; color: var(--on-surface); }
+.nav-item.is-active .label { color: var(--on-surface); }
 
 @media (orientation: portrait) {
   .layout { flex-direction: column; }
@@ -596,8 +596,23 @@ select.btn {
 @media (min-width: 600px) { .poster-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 @media (min-width: 840px) { .poster-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
 .poster-card {
+  position: relative;
   background: var(--surface-container-low); color: var(--on-surface);
   border-radius: var(--r-img); overflow: hidden; cursor: pointer; display: flex; flex-direction: column;
+}
+/* NEW 角标（2026-11-09 用户亲口定）：开播 ≤7 天的卡，右上角红色 NEW。
+   只标新开播的，不标老番；未来开播的用待播行，不加 NEW。 */
+.new-badge {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  padding: 2px 6px; border-radius: 6px; background: #d32f2f; color: #fff;
+  font-size: 11px; font-weight: 800; line-height: 1.5; letter-spacing: 0.5px;
+  pointer-events: none;
+}
+/* 待播日期不折叠（2026-11-09 用户亲口定）：未开播卡片的更新行
+   完整显示“待播 2026年11月29日 周六开播”，不许截断、不许省略号、
+   字号不够就换行显示，不要折叠隐藏。 */
+.poster-card.is-upcoming .sub {
+  display: block; overflow: visible; -webkit-line-clamp: unset; -webkit-box-orient: initial;
 }
 .poster-card img { width: 100%; aspect-ratio: 0.65; object-fit: cover; background: var(--surface-container-highest); border-radius: var(--r-img); }
 .poster-card .name {
@@ -616,6 +631,8 @@ select.btn {
 .region-chips { margin: 2px 0 16px; }
 .home-section { margin: 0 0 20px; }
 .kids-section { margin-top: 24px; }
+/* 列表到底状态行（2026-11-09 用户亲口定）：翻到底了要明说“已经到底了”，不许无声消失。 */
+.end-line { text-align: center; color: var(--on-surface-variant); font-size: 12px; padding: 12px 0 24px; }
 .home-section .section-header { padding: 0 0 8px; }
 .hscroll {
   display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 6px;
@@ -665,6 +682,10 @@ select.btn {
 .tl-title { font-size: 16px; line-height: 1.5; font-weight: 700; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .tl-meta { margin-top: 8px; font-size: 12px; line-height: 1.33; color: var(--on-surface-variant); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-update { margin-top: 4px; font-size: 12px; line-height: 1.33; color: var(--on-surface-variant); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 待播日期不折叠：时间表/搜索卡的待播行同样完整显示、换行不截断。 */
+.tl-card.is-upcoming .tl-update, .result-card.is-upcoming .update {
+  white-space: normal; overflow: visible; text-overflow: clip;
+}
 .tl-foot { margin-top: auto; padding-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tl-foot .bookmark { width: 20px; height: 20px; color: var(--primary); }
 .rating-pill {
@@ -848,6 +869,20 @@ select.btn {
 .result-card .meta { margin-top: 4px; display: flex; align-items: center; gap: 10px; font-size: var(--label-medium-size); font-weight: var(--label-medium-weight); }
 .result-card .meta .score { display: inline-flex; align-items: center; gap: 2px; }
 .result-card .update { margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--on-surface-variant); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 选集分段快捷条（2026-11-09 用户亲口定）：集数多（>50 集）时可见，
+   每 50 集一段，点一段直接跳过去，不用往下翻；≤50 集不显示，不多余。 */
+.ep-seg-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+.ep-seg-chip {
+  min-height: 36px; padding: 0 12px; border-radius: 18px; border: 1px solid var(--outline-variant);
+  background: var(--surface-container); color: var(--on-surface); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.ep-seg-chip.is-active { background: var(--primary); color: var(--on-primary); border-color: transparent; }
+/* 上次看到置顶条：点一下直接续播那一集。 */
+.ep-resume {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; padding: 0 14px;
+  border-radius: 14px; border: none; background: var(--secondary-container); color: var(--on-secondary-container);
+  font-size: 14px; font-weight: 700; text-align: left; cursor: pointer; margin-bottom: 10px;
+}
 .result-card .meta .score svg { width: 14px; height: 14px; color: var(--primary); }
 .result-card .meta .year { color: var(--on-surface-variant); }
 .results-more { display: flex; justify-content: center; padding: 16px 0 8px; font-size: var(--body-small-size); color: var(--on-surface-variant); }
@@ -1041,14 +1076,42 @@ body.no-scroll { overflow: hidden; }
 .player-wrap.is-rotated { position: fixed; left: 50%; top: 50%; width: 100vh; width: 100dvh; height: 100vw; height: 100dvw; max-height: none; transform: translate(-50%, -50%) rotate(90deg); z-index: 9999; border-radius: 0; margin: 0; }
 /* 点按层：盖在视频中间一段（上下留空：顶部 44px、底部 84px 给原生控制条
    和返回键；点视频自带的全屏按钮不能被判定成暂停——2026-11-07 真机反馈），
-   点按不碰 video 元素本身，原生控制层不会弹出来；单击/双击分开判断（见 player.js bindTapSeek）。 */
-.player-wrap .tap-zone { position: absolute; left: 0; right: 0; top: 44px; bottom: 84px; z-index: 3; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+   点按不碰 video 元素本身，原生控制层不会弹出来；长按 2 倍速 / 双击播放暂停 / 单点显隐控制条（见 player.js bindTapSeek）。 */
+.player-wrap .tap-zone { position: absolute; left: 0; right: 0; top: 44px; bottom: 84px; z-index: 3; touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; }
+/* 边缘快进/快退判定区：左右各 34% 宽（竖屏 393px 下约 134px）、高覆盖视频主体
+   （同 tap-zone：顶部 44px、底部 84px 留空）；z-index 4 在 tap-zone 之上、
+   跳过片头按钮(7)之下；横屏旋转时铺满（与 .is-rotated .tap-zone 一致）。
+   长按 250ms 触发 2 倍速（右快进/左快退），单点不快进（见 player.js bindTapSeek）。 */
+.edge-zone { position: absolute; top: 44px; bottom: 84px; z-index: 4; touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; }
+.edge-zone.edge-left { left: 0; width: 34%; }
+.edge-zone.edge-right { right: 0; width: 34%; }
+.player-wrap.is-rotated .edge-zone { top: 0; bottom: 0; }
 .player-wrap.is-rotated video { width: 100%; height: 100%; max-height: none; }
 .player-wrap .rotate-exit { display: none; position: absolute; top: 12px; right: 12px; z-index: 7; padding: 8px 14px; border-radius: 20px; border: none; background: rgba(0,0,0,0.6); color: #fff; font-size: 14px; cursor: pointer; }
 .player-wrap.is-rotated .rotate-exit { display: block; }
 .player-wrap .seek-flash { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 10px 18px; border-radius: 24px; background: rgba(0,0,0,0.65); color: #fff; font-size: 16px; font-weight: 700; opacity: 0; pointer-events: none; transition: opacity 0.15s; z-index: 6; }
 .player-wrap .seek-flash.is-show { opacity: 1; }
 .player-wrap .big-play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 76px; height: 76px; border-radius: 50%; border: none; background: rgba(0,0,0,0.65); color: #fff; font-size: 30px; line-height: 1; cursor: pointer; z-index: 7; }
+/* 原生字幕轨（全屏时浏览器渲染的 ::cue）样式：半透明底，不遮画面。 */
+video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
+/* 跳过片头浮钮：只在片头窗口内出现；z-index 7，高于 tap-zone(3)/dual-sub(5)，
+   与 seek-flash/big-play 同级；min-height 48px 拇指目标；bottom 96px 在
+   原生控制条上方（tap-zone 旧的 84px 参考值之上），不盖字幕主行。 */
+.skip-intro-btn { position: absolute; right: 12px; bottom: 96px; z-index: 7; min-height: 48px; min-width: 96px; padding: 12px 18px; border-radius: 24px; border: none; background: rgba(0,0,0,0.7); color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+/* 锁按钮：一个布尔开关 + 一个 CSS class 藏按钮，仅此而已。
+   .ui-locked 藏：页面控制条、跳过片头浮钮、横屏退出键、大播放按钮；
+   不藏：角落小锁图标（解锁用）、字幕、手势层。 */
+.player-main.ui-locked .player-controls { display: none; }
+.player-main.ui-locked .skip-intro-btn { display: none !important; }
+.player-main.ui-locked .rotate-exit { display: none !important; }
+.player-main.ui-locked .big-play { display: none !important; }
+/* 锁图标常驻：永远显示、永不自动隐藏——不管锁开锁关、播放暂停、横屏竖屏，
+   都在画面右上角固定位置，随时能点到；藏按钮的 class 绝不能把它也藏了，
+   所以这里用 !important 反向兜底。它没有消失定时器（5 秒消失的只有跳过片头提示条）。 */
+.player-main.ui-locked .ui-lock-btn { display: block !important; visibility: visible !important; opacity: 1 !important; }
+.ui-lock-btn { position: absolute; top: 8px; right: 8px; z-index: 8; width: 48px; height: 48px; min-width: 48px; border-radius: 50%; border: none; background: rgba(0,0,0,0.55); color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
+.skip-pill { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 24px; background: rgba(0,0,0,0.75); color: #fff; font-size: 14px; white-space: nowrap; }
+.skip-pill button { min-height: 32px; padding: 4px 12px; border-radius: 16px; border: none; background: rgba(255,255,255,0.25); color: #fff; font-size: 14px; cursor: pointer; }
 .player-wrap .player-back { position: absolute; top: max(env(safe-area-inset-top), 8px); left: 8px; z-index: 4; }
 .danmaku-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .danmaku-canvas.is-hidden { display: none; }
@@ -1065,7 +1128,47 @@ body.no-scroll { overflow: hidden; }
    但旋转后那两条空在屏幕左右两边、不是控制条的位置，反而成了点按死区
    （横屏双击快进点不到，2026-11-07 桌面实测：横屏双击只切播放/暂停）。 */
 .player-wrap.is-rotated .tap-zone { top: 0; bottom: 0; }
-.player-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+/* 控制条“更多”溢出菜单 + 右侧滚动提示（2026-11-09 复核后改）：
+   画质/字幕/画面比例/重新解析/画中画移进菜单，主排只剩 7 个固定项，
+   行宽从加载时就定死，不再随画质/字幕下拉出现而变宽；竖屏 393px 下
+   主排仍可能超出，右侧“›”只在还能往右滑时出现，滑到底就消失。 */
+.player-controls-wrap { position: relative; }
+.controls-scroll-hint { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 2; pointer-events: none; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; background: rgba(0,0,0,0.55); color: #fff; font-size: 18px; font-weight: 700; }
+.controls-scroll-hint.is-hidden { display: none; }
+.player-more-menu { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; padding: 10px; border-radius: 12px; background: rgba(255,255,255,0.06); }
+.player-more-menu.is-open { display: flex; }
+.player-more-menu > * { flex: 0 0 auto; min-height: 48px; }
+.player-controls { display: flex; flex-wrap: nowrap; gap: 8px; margin: 16px 0; overflow-x: auto; overflow-y: hidden; align-items: center; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.player-controls::-webkit-scrollbar { display: none; }
+.player-controls > * { flex: 0 0 auto; min-height: 48px; }
+/* 控制条紧凑化 + 自动隐藏（按钮比例对照国内播放器后调：竖屏 393px 下
+   单个按钮 50–115px 宽、高 48px；锁图标 48px 占屏宽 12.2%，与 B站/腾讯/
+   爱奇艺手机端的 40–48px（占屏宽约 10–12%）相当；带中文文案的按钮仍比
+   纯图标宽，整排约 1100px、竖屏需横向滑动才能点到最后几个——12 个带文案
+   按钮按 10–12% 是塞不进 393px 一排的，纯图标才行；但导航栏无文案图标
+   已被用户投诉过点错，所以文案保留、行保持可横向滑动，1.25 倍在第 4 个、
+   不用滑动就点得到。 */
+.player-controls { gap: 6px; }
+.player-controls .btn { min-width: 48px; padding: 8px 12px; font-size: 13px; }
+.player-controls .btn svg { width: 18px; height: 18px; }
+/* 控制条自动隐藏：播放中 1.5 秒无操作淡出（opacity 过渡，不用 display，
+   避免布局跳动）；单点/点锁图标时再出现；暂停时一直显示；锁住时由
+   .ui-locked 的 display:none 藏着。锁图标（.ui-lock-btn）与字幕永不隐藏，
+   所以这里不列它们。 */
+.player-controls, .skip-intro-btn, .rotate-exit, .player-wrap .player-back { transition: opacity .3s; }
+.player-main.controls-hidden .player-controls,
+.player-main.controls-hidden .skip-intro-btn,
+.player-main.controls-hidden .rotate-exit,
+.player-main.controls-hidden .player-back { opacity: 0; visibility: hidden; pointer-events: none; }
+/* 横屏/竖屏：控制条始终一排、可横向滑动、不折行、不互相遮；旋转只改 CSS
+   transform，不重建 video、不丢进度、不重播（见 player.js toggleLandscape）。 */
+@media (orientation: landscape) {
+  .player-wrap video { max-height: 100vh; }
+  .player-controls { flex-wrap: nowrap; }
+}
+@media (orientation: portrait) {
+  .player-controls { flex-wrap: nowrap; }
+}
 /* 弹幕源 sheet：三段进度条（当前 primary / 已完成 primaryContainer / 未到 outlineVariant） */
 .step-bar { display: flex; gap: 6px; margin: 0 0 16px; }
 .step-bar span { flex: 1; height: 4px; border-radius: 2px; background: var(--outline-variant); }

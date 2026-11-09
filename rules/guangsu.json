@@ -1,0 +1,53 @@
+{
+    "api": "9",
+    "type": "anime",
+    "name": "guangsu",
+    "version": "1.0",
+    "muliSources": true,
+    "useWebview": false,
+    "useNativePlayer": true,
+    "usePost": false,
+    "useLegacyParser": false,
+    "adBlocker": true,
+    "userAgent": "",
+    "baseURL": "https://api.guangsuapi.com/",
+    "searchURL": "",
+    "searchMode": "api",
+    "chapterMode": "api",
+    "searchApiConfig": {
+        "request": {
+            "method": "GET",
+            "url": "https://api.guangsuapi.com/api.php/provide/vod/",
+            "query": {
+                "ac": "videolist",
+                "wd": "@keyword"
+            }
+        },
+        "listPath": "$.list[*]",
+        "namePath": "$.vod_name",
+        "sourcePath": "$.vod_id",
+        "sourceTemplate": ""
+    },
+    "chapterApiConfig": {
+        "request": {
+            "method": "GET",
+            "url": "https://api.guangsuapi.com/api.php/provide/vod/",
+            "query": {
+                "ac": "detail",
+                "ids": "@source"
+            }
+        },
+        "format": "delimited",
+        "roadNamesPath": "$.list[0].vod_play_from",
+        "roadEpisodesPath": "$.list[0].vod_play_url",
+        "roadSeparator": "$$$",
+        "episodeSeparator": "#",
+        "fieldSeparator": "$"
+    },
+    "searchList": "",
+    "searchName": "",
+    "searchResult": "",
+    "chapterRoads": "",
+    "chapterResult": "",
+    "referer": ""
+}
