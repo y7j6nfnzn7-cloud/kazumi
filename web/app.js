@@ -630,6 +630,10 @@ function updateInfoFor(item) {
   if (m) air = { y: +m[1], mo: +m[2], d: +m[3] };
   else air = parseInfoDate(item.info);
   if (!air) return null;
+  // 无效日期直接当没有日期：Bangumi 里老片常给 "0000-00-00"，
+  // new Date(0,-1,0) 会算成 1899 年 11 月，卡片上就冒出 "1899年11月"
+  // （2026-11-08 实测：呼唤少女等 17 条老片中招）。
+  if (air.y < 1900 || air.mo < 1 || air.mo > 12 || air.d < 1 || air.d > 31) return null;
   const total = parseInfoEps(item.info);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const first = new Date(air.y, air.mo - 1, air.d); first.setHours(0, 0, 0, 0);
@@ -665,7 +669,9 @@ function updateInfoFor(item) {
 // short=true 时只返回前半句（日期+星期+状态），横滑小卡片用，保证一行内完整显示、不被省略号截断
 function updateLineFor(item, short) {
   const u = updateInfoFor(item);
-  if (!u) return "";
+  // 没有有效开播日（老片 Bangumi 缺日期）：
+  // 不显示假日期；拉到集数就显示“共N集”，没拉到就空着、等集数回来再补。
+  if (!u) return item.airedCount != null ? "共" + item.airedCount + "集" : "";
   // 总集数未知、且开播已超过 26 周：无法判断是否还在更新，不推测更新日，
   // 但不空白——显示开播年月（用户 2026-11-07 定：分类页卡片也要有更新行）。
   // 例外：已拉到实际已播集数时，按真实集数算出“已完结/更新日”，不只显示年月
@@ -952,7 +958,8 @@ function pumpBangumiEpisodes() {
 // “已完结/更新日”（2026-11-08 用户亲口定：也要显示）。
 function needsAiredCount(item) {
   const u = updateInfoFor(item);
-  if (!u) return false;
+  // 没有有效开播日（老片 Bangumi 缺日期）：也要拉集数，不然卡片上什么都显示不了。
+  if (!u) return true;
   if ((Date.now() - u.airDate.getTime()) <= 2 * 365 * 86400000) return true;
   return !u.total;
 }
