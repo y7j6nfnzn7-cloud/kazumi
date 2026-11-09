@@ -606,7 +606,10 @@ select.btn {
 }
 .poster-card .sub {
   padding: 0 5px 5px; font-size: 12px; line-height: 1.4; color: var(--on-surface-variant);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* 主榜卡片和横滑卡一样窄（约 117px），更新行只给一行会被截断
+     （2026-11-08 用户截图：已完结的“2017年3月25日完结 · 共12集”
+     只显示到“2017年3月25日…”）。放开到两行，保证日期+完结+集数完整可见。 */
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 
 /* 主页地区分类 chips + 最近热播 / 新发分区横滑行 */
