@@ -1218,6 +1218,28 @@ async function renderPlayer(params) {
     video.addEventListener("pause", send);
     window.addEventListener("pagehide", send, { once: true });
   }
+
+  // ====== 自动播放：解析完就播，不停在暂停 ======
+  // 之前这里没有任何 play() 调用（play 只在键盘/点按手势里），所以解析完
+  // 流接上了也一直停在 0:00，快进能换帧、时间不走。放最后调用：续播 doSeek
+  // 已先注册（loadedmetadata 先 seek 再播），不会播起来又被拉回进度。
+  // iOS 拦有声自动播时 play() 会 reject，显示一个大播放按钮兜底，点一下就行。
+  const showBigPlay = () => {
+    if (playerWrap.querySelector(".big-play")) return;
+    const b = el("button", { class: "big-play", type: "button", "aria-label": "播放" }, "▶");
+    b.addEventListener("click", () => { b.remove(); video.play().catch(() => {}); });
+    video.addEventListener("playing", () => b.remove(), { once: true });
+    playerWrap.append(b);
+  };
+  const tryAutoplay = () => {
+    if (video.error) return;
+    try {
+      const p = video.play();
+      if (p && typeof p.catch === "function") p.catch(() => showBigPlay());
+    } catch (_) { showBigPlay(); }
+  };
+  if (video.readyState >= 1) tryAutoplay();
+  else video.addEventListener("loadedmetadata", tryAutoplay, { once: true });
 }
 
 // 离开播放页时销毁 hls.js + 弹幕 + 进度上报
