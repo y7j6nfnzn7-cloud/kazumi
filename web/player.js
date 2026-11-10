@@ -857,7 +857,7 @@ function bindTapSeek(video, wrap) {
 
   // ---- 控制条自动隐藏（按钮不长时间盖住正片） ----
   // 控制条在视频下方页面流里，本身不盖画面；但横屏旋转态、跳过片头浮钮、
-  // 横屏退出键、返回键都在画面上，1.5 秒无操作就一起淡出（.controls-hidden），
+  // 全屏退出键、返回键都在画面上，1.5 秒无操作就一起淡出（.controls-hidden），
   // 单点/点锁图标时再短暂出现。锁图标（.ui-lock-btn）永不隐藏，字幕永不隐藏。
   const main = wrap.closest(".player-main");
   const controlsEl = main ? main.querySelector(".player-controls") : null;
@@ -939,7 +939,19 @@ function bindTapSeek(video, wrap) {
   let lastRealPressEndAt = 0; // 最近一次真实点按（mouseup/touchend）结束的时间戳；浏览器自己的 click 紧跟在它后面（<100ms），靠它识别、忽略——合成 click 不更新它
 
   const doSingleTap = () => {
-    if (isLocked()) return; // 锁住时单点什么都不做，按钮继续藏着
+    if (isLocked()) {
+      // 锁住时单点不再静默无反应（2026-11-10 用户定：锁不能把人困住）：
+      // 明确告诉用户怎么解锁，并让右上角的锁图标闪一下、看得见。
+      toast("已锁定，点右上角锁解锁");
+      const lockBtn = main && main.querySelector(".ui-lock-btn");
+      if (lockBtn) {
+        lockBtn.classList.remove("is-attention");
+        void lockBtn.offsetWidth; // 强制重排，让脉冲动画每次点按都能重播
+        lockBtn.classList.add("is-attention");
+        setTimeout(() => lockBtn.classList.remove("is-attention"), 900);
+      }
+      return;
+    }
     if (!main) return;
     if (main.classList.contains("controls-hidden")) showControls();
     else hideControls();
@@ -1098,7 +1110,7 @@ function inWebkitFullscreen(video) {
 }
 async function toggleLandscape(video, wrap, btn) {
   if (wrap.classList.contains("is-rotated")) { exitRotated(wrap, btn); return; }
-  if (document.fullscreenElement) { await document.exitFullscreen().catch(() => {}); setLandscapeLabel(btn, "横屏"); return; }
+  if (document.fullscreenElement) { await document.exitFullscreen().catch(() => {}); setLandscapeLabel(btn, "全屏"); return; }
   if (inWebkitFullscreen(video)) {
     // 等原生全屏退出（webkitendfullscreen）再旋转，避免两层叠加。
     // 第一次退出若被忽略（转场进行中调用会被吞），再试一次。
@@ -1118,11 +1130,11 @@ async function toggleLandscape(video, wrap, btn) {
       if (screen.orientation && screen.orientation.lock) {
         await screen.orientation.lock("landscape").catch(() => {});
       }
-      setLandscapeLabel(btn, "退出横屏");
+      setLandscapeLabel(btn, "退出全屏");
       const onFs = () => {
         if (!document.fullscreenElement) {
           document.removeEventListener("fullscreenchange", onFs);
-          setLandscapeLabel(btn, "横屏");
+          setLandscapeLabel(btn, "全屏");
           if (screen.orientation && screen.orientation.unlock) { try { screen.orientation.unlock(); } catch (_) {} }
         }
       };
@@ -1155,7 +1167,7 @@ function bindNativeFullscreenGuard(video, wrap, btn) {
     }, 800);
   });
   video.addEventListener("webkitendfullscreen", () => {
-    if (!wrap.classList.contains("is-rotated")) setLandscapeLabel(btn, "横屏");
+    if (!wrap.classList.contains("is-rotated")) setLandscapeLabel(btn, "全屏");
   });
 }
 function enterRotated(wrap, btn) {
@@ -1163,19 +1175,19 @@ function enterRotated(wrap, btn) {
   document.body.classList.add("no-scroll");
   let exit = wrap.querySelector(".rotate-exit");
   if (!exit) {
-    exit = el("button", { class: "rotate-exit sl", type: "button" }, "退出横屏");
+    exit = el("button", { class: "rotate-exit sl", type: "button" }, "退出全屏");
     exit.addEventListener("click", (ev) => { ev.stopPropagation(); exitRotated(wrap, btn); });
     wrap.append(exit);
   }
   exit.style.display = "";
-  setLandscapeLabel(btn, "退出横屏");
+  setLandscapeLabel(btn, "退出全屏");
 }
 function exitRotated(wrap, btn) {
   wrap.classList.remove("is-rotated");
   document.body.classList.remove("no-scroll");
   const exit = wrap.querySelector(".rotate-exit");
   if (exit) exit.style.display = "none";
-  setLandscapeLabel(btn, "横屏");
+  setLandscapeLabel(btn, "全屏");
 }
 
 // ============================================================
@@ -1306,8 +1318,8 @@ async function renderPlayer(params) {
   activeVideoEl = video;
 
   // ====== 控件行：上一集 / 下一集 / 倍速 / 画面比例 / 重新解析 ======
-  const prevBtn = button("上一集", { icon: "skip_previous" });
-  const nextBtn = button("下一集", { icon: "skip_next" });
+  const prevBtn = button("上一集");
+  const nextBtn = button("下一集");
   prevBtn.disabled = true;
   nextBtn.disabled = true;
 
@@ -1315,10 +1327,15 @@ async function renderPlayer(params) {
   let prefs = {};
   try { prefs = JSON.parse(localStorage.getItem("playerPrefs") || "{}") || {}; } catch (_) {}
   const savePrefs = (patch) => { Object.assign(prefs, patch); try { localStorage.setItem("playerPrefs", JSON.stringify(prefs)); } catch (_) {} };
+  // 锁不跨页面/跨集保留（2026-11-10 用户定：锁不能把人困住）：每次打开
+  // 播放器、每换一集都默认解锁。旧的 playerPrefs.uiLock=true 会让锁住
+  // 的状态跟到下一集/下一次打开，点画面也没反应，所以一进播放页就清掉
+  // 并写回；锁只在本集内有效。
+  if (prefs.uiLock) { prefs.uiLock = false; savePrefs({ uiLock: false }); }
   const rateSelect = el("select", { class: "btn btn-tonal", "aria-label": "倍速" });
   const initialRate = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0].includes(prefs.rate) ? prefs.rate : 1.0;
   for (const r of [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]) {
-    const opt = el("option", { value: String(r) }, r === 1.0 ? "倍速 1x" : "倍速 " + r + "x");
+    const opt = el("option", { value: String(r) }, r + "x");
     if (r === initialRate) opt.setAttribute("selected", "");
     rateSelect.append(opt);
   }
@@ -1346,7 +1363,7 @@ async function renderPlayer(params) {
   // 不能只靠点按视频——竖屏时 tap-zone 只覆盖视频主体（top:44px/bottom:84px，
   // 上下留给返回键和控制条区；横屏旋转态才铺满全幅，见 styles.css），
   // 按钮仍是无障碍与桌面端的兜底。
-  const playPauseBtn = button("暂停", { variant: "text", icon: "pause", onclick: () => {
+  const playPauseBtn = button("暂停", { variant: "text", onclick: () => {
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   } });
@@ -1356,20 +1373,19 @@ async function renderPlayer(params) {
   };
   video.addEventListener("play", syncPlayPauseBtn);
   video.addEventListener("pause", syncPlayPauseBtn);
-  // 控制条主排（2026-11-09 复核后改）：只留 7 个固定项——播放/暂停、
-  // 上一集、下一集、倍速、跳过片头、横屏、更多，行宽从加载时就定死。
-  // 画质/字幕/画面比例/重新解析/画中画移进“更多”菜单：之前它们是事后
-  // 追加或按需出现（display:none ↔ 显示），开播后会把后面的按钮向右顶
-  // 约 90–110px，按钮位置在播起来之后才变。快退/快进 10 秒按钮已删
-  // （长按 2 倍速已覆盖）；控制条里的“锁按钮”已删（角落常驻锁图标
-  // 才是用户要的入口，两个锁重复）。
+  // 控制条主排（2026-11-10 按腾讯思路重排）：只留 6 个固定项——播放/暂停、
+  // 上一集、下一集、倍速、跳过片头开关、全屏，flex 均分一排全部可见、
+  // 不横向滑动（旧的 7 项 + 横向滑动 + 右侧“›”提示已删，用户找不到按钮）。
+  // 画质/字幕/画面比例/重新解析/画中画仍在“更多”菜单里，只是触发按钮
+  // 挪到下面第二行，不占主排。快退/快进 10 秒按钮已删（长按 2 倍速已覆盖）；
+  // 控制条里的“锁按钮”已删（角落常驻锁图标才是用户要的入口，两个锁重复）。
   const moreMenu = el("div", { class: "player-more-menu" });
   const moreBtn = button("更多", { variant: "text", onclick: (ev) => {
     if (ev) ev.stopPropagation();
     moreMenu.classList.toggle("is-open");
   } });
   const reload = button("重新解析", { variant: "text", icon: "refresh", onclick: () => renderPlayer(params) });
-  const landscapeBtn = button("横屏", { variant: "text", onclick: () => toggleLandscape(video, playerWrap, landscapeBtn) });
+  const landscapeBtn = button("全屏", { variant: "text", onclick: () => toggleLandscape(video, playerWrap, landscapeBtn) });
   // 画质下拉（仅 hls.js 分支）：MANIFEST_PARSED 后读 hls.levels 生成；
   // 单码率（levels<=1）或 Safari 原生 HLS 时隐藏（原生无 JS 画质接口）。
   const qualitySelect = el("select", { class: "btn btn-tonal", "aria-label": "画质" });
@@ -1393,20 +1409,22 @@ async function renderPlayer(params) {
   window.__onHlsLevels = populateQuality;
   populateQuality(activeHlsLevels);
   // 自动跳过片头开关：默认关（false），记在 playerPrefs；只在有正式 introEnd
-  // 的番上生效，没标定的番不跳。开关在控制行随时能关。
-  const skipToggleBtn = button("跳过片头：关", { variant: "text", onclick: () => {
+  // 的番上生效，没标定的番不跳。开关在控制行随时能关；开的状态用高亮
+  // （.is-on）表示，文案固定写“跳过片头”（带“：开/关”六个字一排塞不下，
+  // 393px 下“上一集”会被挤掉 2px），切开关时 toast 会报开还是关。
+  const skipToggleBtn = button("跳过片头", { variant: "text", cls: "skip-toggle", onclick: () => {
     const v = !prefs.autoSkipIntro;
     savePrefs({ autoSkipIntro: v });
-    const l = skipToggleBtn.querySelector(".label");
-    if (l) l.textContent = "跳过片头：" + (v ? "开" : "关");
+    skipToggleBtn.classList.toggle("is-on", v);
     toast(v ? "自动跳过片头已开（仅已标定片头的番）" : "自动跳过片头已关");
   } });
-  if (prefs.autoSkipIntro) {
-    const l = skipToggleBtn.querySelector(".label");
-    if (l) l.textContent = "跳过片头：开";
-  }
+  if (prefs.autoSkipIntro) skipToggleBtn.classList.add("is-on");
   // 锁按钮（控制条里那个）已删：角落常驻锁图标才是入口，见 renderPlayer 末尾的 setUiLock/lockIcon。
-  const controls = el("div", { class: "player-controls" }, playPauseBtn, prevBtn, nextBtn, rateSelect, skipToggleBtn, landscapeBtn, moreBtn);
+  // 主排只留 6 个固定项（2026-11-10 按腾讯思路重排）：播放/暂停、上一集、
+  // 下一集、倍速、跳过片头开关、全屏，flex 均分一排全部可见、不横向滑动；
+  // “更多”（画质/画面比例/重新解析/画中画）挪到下面第二行，不占主排。
+  const controls = el("div", { class: "player-controls" }, playPauseBtn, prevBtn, nextBtn, rateSelect, skipToggleBtn, landscapeBtn);
+  const controlsSecondary = el("div", { class: "player-controls-secondary" }, moreBtn);
   // ====== 进度条 + 当前/总时长（2026-11-09 线上复测回归） ======
   // controls:false 后原生进度条没了，自定义控制条之前也漏了进度条——
   // 桌面 Chrome 下 DOM 里根本没有进度条和时长。补一行：range 拖动快进
@@ -1445,24 +1463,9 @@ async function renderPlayer(params) {
     moreMenu.append(button("画中画", { variant: "text", icon: "picture_in_picture", onclick: () => togglePictureInPicture(video) }));
   }
   moreMenu.append(fitSelect, qualitySelect, reload);
-  // 右侧滚动提示：竖屏 393px 下主排仍可能超出，一排滑不动时用户不知道
-  // 后面还有按钮；“›”只在还能往右滑时出现，滑到底就消失。
-  const scrollHint = el("span", { class: "controls-scroll-hint is-hidden", "aria-hidden": "true" }, "›");
-  const controlsWrap = el("div", { class: "player-controls-wrap" }, seekRow, controls, scrollHint);
+  // 主排不再横向滑动，右侧滚动提示和 resize 复查一并删掉（2026-11-10）。
+  const controlsWrap = el("div", { class: "player-controls-wrap" }, seekRow, controls, controlsSecondary);
   main.append(controlsWrap, moreMenu);
-  const updateScrollHint = () => {
-    try { scrollHint.classList.toggle("is-hidden", controls.scrollWidth - controls.clientWidth - controls.scrollLeft <= 8); } catch (_) {}
-  };
-  controls.addEventListener("scroll", updateScrollHint, { passive: true });
-  // resize 监听只挂一次（每次进播放页都挂会越积越多）：存当前这页的
-  // updateScrollHint，旧页面的闭包不再被调。
-  window.__updateControlsHint = updateScrollHint;
-  if (!window.__controlsHintResizeBound) {
-    window.__controlsHintResizeBound = true;
-    window.addEventListener("resize", () => { try { if (window.__updateControlsHint) window.__updateControlsHint(); } catch (_) {} });
-  }
-  updateScrollHint();
-  setTimeout(updateScrollHint, 300); // 布局完成后再复查一次（刚建好时 clientWidth 可能还是 0）
   bindPlayerKeys(video);
   bindTapSeek(video, playerWrap);
   bindNativeFullscreenGuard(video, playerWrap, landscapeBtn);
@@ -1743,7 +1746,12 @@ async function renderPlayer(params) {
     skipPillTimer = setTimeout(() => { if (pill) pill.remove(); }, 5000);
   };
   const seekIntro = (fromAuto) => {
-    if (skipIntroEnd == null || skipDoneThisEp) return false;
+    if (skipIntroEnd == null) {
+      // 没标定的番：手动点的才提示，自动跳不走到这儿（trySkipAuto 先判了 null）。
+      if (!fromAuto) toast("这部还没标定片头，暂不能跳过");
+      return false;
+    }
+    if (skipDoneThisEp) return false;
     skipPreTime = video.currentTime || 0;
     skipDoneThisEp = true;
     try { video.currentTime = skipIntroEnd; } catch (_) { return false; }
@@ -1757,9 +1765,11 @@ async function renderPlayer(params) {
   playerWrap.append(skipBtn);
   // 角落小锁图标：锁住时唯一留在画面上的按钮，点一下就解锁（不误触：
   // 它在右上角 48px，远离中间的点按区和右下角的跳过片头浮钮；锁住时
-  // 控制条、跳过片头浮钮、横屏退出键、大播放按钮都藏起来，画面干净，
-  // 手势（边缘长按 2 倍速快进快退、双击播放/暂停）照常走。状态记 playerPrefs.uiLock，
-  // 下次打开还记得；横屏竖屏都一样（图标在 playerWrap 里，跟着旋转走）。
+  // 控制条、进度条、跳过片头浮钮、全屏退出键、大播放按钮都藏起来，画面干净，
+  // 手势（边缘长按 2 倍速快进快退、双击播放/暂停）照常走。锁只在本集内有效：
+  // 进播放页时已默认解锁（见上方的锁重置），不跨页面/跨集保留；锁住时点画面
+  // 会弹提示“已锁定，点右上角锁解锁”并让锁图标闪一下（见 bindTapSeek 的
+  // doSingleTap）。横屏竖屏都一样（图标在 playerWrap 里，跟着旋转走）。
   const setUiLock = (v) => {
     prefs.uiLock = !!v;
     savePrefs({ uiLock: prefs.uiLock });
@@ -1780,7 +1790,7 @@ async function renderPlayer(params) {
   lockIcon.addEventListener("click", (ev) => { ev.stopPropagation(); toggleUiLock(); });
   lockIcon.addEventListener("touchend", (ev) => { ev.stopPropagation(); ev.preventDefault(); toggleUiLock(); }, { passive: false });
   playerWrap.append(lockIcon);
-  if (prefs.uiLock) main.classList.add("ui-locked");
+  // 进播放页时已默认解锁（见上方的锁重置），这里不再按旧值加锁。
   // 原生进度条拖动的学习：programmaticSeek 为 true 时是 doSeek/自动跳/
   // 按钮 seek，不记；否则是从 <60 秒出发、向前 >=10 秒、落点 10–180 秒的手动跳。
   let programmaticSeek = true, seekFrom = 0, lastStableTime = 0;
@@ -1794,7 +1804,19 @@ async function renderPlayer(params) {
   // 盖住开播时 doSeek 的那次 seek（loadedmetadata 可能在 setup 前已触发，
   // 只靠 loadedmetadata 监听盖不住）；1500ms 后恢复，之后的手动拖动才记学习样本。
   effectiveIntroEnd(bid, plugin).then((row) => {
-    if (!row) return; // 没正式跳点：不显示按钮、不自动跳、不猜秒数
+    if (!row) {
+      // 没标定的番：不猜秒数、不自动跳；但按钮要让用户看得见状态，
+      // 不能悄悄藏起来让人以为按钮坏了。片头时段（前 120 秒）显示
+      // “跳过片头（未标定）”，点它只提示、不跳（见 seekIntro 的
+      // skipIntroEnd==null 分支）；播到正片就自己消失。用户手动跳的
+      // 落点仍走 recordManualSkip 学习，3 次扶正后下次打开就有正式点了。
+      skipBtn.textContent = "跳过片头（未标定）";
+      skipBtn.classList.add("is-unset");
+      video.addEventListener("timeupdate", () => {
+        skipBtn.style.display = (video.currentTime || 0) < 120 ? "" : "none";
+      });
+      return;
+    }
     skipIntroEnd = row.introEnd;
     skipIntroSource = row.source;
     // 手动按钮只在片头窗口内出现

@@ -1099,10 +1099,13 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
    与 seek-flash/big-play 同级；min-height 48px 拇指目标；bottom 96px 在
    原生控制条上方（tap-zone 旧的 84px 参考值之上），不盖字幕主行。 */
 .skip-intro-btn { position: absolute; right: 12px; bottom: 96px; z-index: 7; min-height: 48px; min-width: 96px; padding: 12px 18px; border-radius: 24px; border: none; background: rgba(0,0,0,0.7); color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+/* 未标定的番：浮钮照样出现（让用户看得见状态），只是样子淡一点、点它只提示不跳。 */
+.skip-intro-btn.is-unset { opacity: 0.75; background: rgba(0,0,0,0.5); }
 /* 锁按钮：一个布尔开关 + 一个 CSS class 藏按钮，仅此而已。
    .ui-locked 藏：页面控制条、跳过片头浮钮、横屏退出键、大播放按钮；
    不藏：角落小锁图标（解锁用）、字幕、手势层。 */
 .player-main.ui-locked .player-controls { display: none; }
+.player-main.ui-locked .player-seek-row { display: none; }
 .player-main.ui-locked .skip-intro-btn { display: none !important; }
 .player-main.ui-locked .rotate-exit { display: none !important; }
 .player-main.ui-locked .big-play { display: none !important; }
@@ -1111,6 +1114,10 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
    所以这里用 !important 反向兜底。它没有消失定时器（5 秒消失的只有跳过片头提示条）。 */
 .player-main.ui-locked .ui-lock-btn { display: block !important; visibility: visible !important; opacity: 1 !important; }
 .ui-lock-btn { position: absolute; top: 8px; right: 8px; z-index: 8; width: 48px; height: 48px; min-width: 48px; border-radius: 50%; border: none; background: rgba(0,0,0,0.55); color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
+/* 锁住时锁图标变红底，一眼能分清锁开锁关；锁住时点画面提示解锁，它再闪两下。 */
+.player-main.ui-locked .ui-lock-btn { background: rgba(220, 38, 38, 0.75); }
+@keyframes lock-attention { 0% { transform: scale(1); } 30% { transform: scale(1.25); } 60% { transform: scale(1); } 100% { transform: scale(1); } }
+.ui-lock-btn.is-attention { animation: lock-attention 0.45s ease-in-out 2; background: rgba(220, 38, 38, 0.85); border: 2px solid #fff; }
 .skip-pill { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 24px; background: rgba(0,0,0,0.75); color: #fff; font-size: 14px; white-space: nowrap; }
 .skip-pill button { min-height: 32px; padding: 4px 12px; border-radius: 16px; border: none; background: rgba(255,255,255,0.25); color: #fff; font-size: 14px; cursor: pointer; }
 .player-wrap .player-back { position: absolute; top: max(env(safe-area-inset-top), 8px); left: 8px; z-index: 4; }
@@ -1129,46 +1136,60 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
    但旋转后那两条空在屏幕左右两边、不是控制条的位置，反而成了点按死区
    （横屏双击快进点不到，2026-11-07 桌面实测：横屏双击只切播放/暂停）。 */
 .player-wrap.is-rotated .tap-zone { top: 0; bottom: 0; }
-/* 控制条“更多”溢出菜单 + 右侧滚动提示（2026-11-09 复核后改）：
-   画质/字幕/画面比例/重新解析/画中画移进菜单，主排只剩 7 个固定项，
-   行宽从加载时就定死，不再随画质/字幕下拉出现而变宽；竖屏 393px 下
-   主排仍可能超出，右侧“›”只在还能往右滑时出现，滑到底就消失。 */
+/* 控制条“更多”溢出菜单（2026-11-10 按腾讯思路重排）：
+   主排只剩 6 个固定项（播放/暂停、上一集、下一集、倍速、跳过片头开关、
+   全屏），flex 均分一排全部可见、不横向滑动；画质/字幕/画面比例/
+   重新解析/画中画仍在“更多”菜单里，触发按钮挪到下面第二行。
+   右侧滚动提示“›”已删——主排不再滑动，没东西可提示。 */
 .player-controls-wrap { position: relative; }
-.controls-scroll-hint { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 2; pointer-events: none; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; background: rgba(0,0,0,0.55); color: #fff; font-size: 18px; font-weight: 700; }
-.controls-scroll-hint.is-hidden { display: none; }
 .player-more-menu { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; padding: 10px; border-radius: 12px; background: rgba(255,255,255,0.06); }
 .player-more-menu.is-open { display: flex; }
 .player-more-menu > * { flex: 0 0 auto; min-height: 48px; }
-.player-controls { display: flex; flex-wrap: nowrap; gap: 8px; margin: 16px 0; overflow-x: auto; overflow-y: hidden; align-items: center; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-.player-controls::-webkit-scrollbar { display: none; }
-.player-controls > * { flex: 0 0 auto; min-height: 48px; }
+/* 主排：六个按钮 flex 均分（跳过片头占 1.5 份、倍速占 1.3 份），文案按钮
+   不用图标，393px 下刚好一排；再窄就省略号兜底，不藏按钮、不横向滑动。
+   按钮高 48px，字 13px，横向 padding 只留 4px——“上一集”3 字 39px、
+   “跳过片头”4 字 52px、“1.25x”约 33px 都放得下（内容宽 361px、
+   gap 6px×5=30px，六项共 6.8 份、每份约 48.7px）。 */
+.player-controls { display: flex; flex-wrap: nowrap; gap: 6px; margin: 12px 0 0; overflow: visible; align-items: stretch; }
+.player-controls > * { flex: 1 1 0; min-width: 0; min-height: 48px; }
+.player-controls .btn { min-width: 0; padding: 10px 4px; font-size: 13px; text-align: center; white-space: nowrap; overflow: hidden; }
+.player-controls .btn .label { overflow: hidden; text-overflow: ellipsis; }
+.player-controls select.btn { flex: 1.3 1 0; padding: 6px 2px; }
+.player-controls .skip-toggle { flex: 1.5 1 0; }
+.player-controls .skip-toggle.is-on { background: var(--primary-container); font-weight: 700; }
+/* 第二行：只放“更多”触发按钮，菜单内容不变（画质/画面/重新解析/画中画）。 */
+.player-controls-secondary { display: flex; gap: 6px; margin: 6px 0 16px; }
+.player-controls-secondary .btn { min-height: 48px; padding: 8px 14px; font-size: 13px; }
 /* 进度条行（2026-11-09 线上复测回归补）：range 拖动快进 + 当前/总时长，
-   放在按钮行上面；跟控制条一起自动隐藏（.controls-hidden），拖它也续命。 */
+   放在按钮行上面；竖屏时固定可见（见下面的 portrait 覆盖），横屏旋转态
+   仍跟控制条一起自动隐藏（.controls-hidden）；拖它也续命。 */
 .player-seek-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }
 .player-seek { flex: 1; min-width: 0; height: 28px; margin: 0; accent-color: var(--primary); cursor: pointer; }
 .player-time { flex: 0 0 auto; font-size: 13px; font-variant-numeric: tabular-nums; opacity: 0.85; white-space: nowrap; }
-/* 控制条紧凑化 + 自动隐藏（按钮比例对照国内播放器后调：竖屏 393px 下
-   单个按钮 50–115px 宽、高 48px；锁图标 48px 占屏宽 12.2%，与 B站/腾讯/
-   爱奇艺手机端的 40–48px（占屏宽约 10–12%）相当；带中文文案的按钮仍比
-   纯图标宽，整排约 1100px、竖屏需横向滑动才能点到最后几个——12 个带文案
-   按钮按 10–12% 是塞不进 393px 一排的，纯图标才行；但导航栏无文案图标
-   已被用户投诉过点错，所以文案保留、行保持可横向滑动，1.25 倍在第 4 个、
-   不用滑动就点得到。 */
-.player-controls { gap: 6px; }
-.player-controls .btn { min-width: 48px; padding: 8px 12px; font-size: 13px; }
-.player-controls .btn svg { width: 18px; height: 18px; }
 /* 控制条自动隐藏：播放中 1.5 秒无操作淡出（opacity 过渡，不用 display，
    避免布局跳动）；单点/点锁图标时再出现；暂停时一直显示；锁住时由
    .ui-locked 的 display:none 藏着。锁图标（.ui-lock-btn）与字幕永不隐藏，
-   所以这里不列它们。 */
+   所以这里不列它们。注意：下面的竖屏覆盖让页面流里的控制区（进度条 +
+   按钮行）和跳过片头浮钮在竖屏时固定可见——1.5 秒淡出只藏画面上的
+   浮层（返回键、横屏退出键），不藏竖屏控制区；横屏旋转态仍走这套
+   .controls-hidden（控制区随浮层一起藏），全屏行为不动。 */
 .player-controls, .player-seek-row, .skip-intro-btn, .rotate-exit, .player-wrap .player-back { transition: opacity .3s; }
 .player-main.controls-hidden .player-controls,
 .player-main.controls-hidden .player-seek-row,
 .player-main.controls-hidden .skip-intro-btn,
 .player-main.controls-hidden .rotate-exit,
 .player-main.controls-hidden .player-back { opacity: 0; visibility: hidden; pointer-events: none; }
-/* 横屏/竖屏：控制条始终一排、可横向滑动、不折行、不互相遮；旋转只改 CSS
-   transform，不重建 video、不丢进度、不重播（见 player.js toggleLandscape）。 */
+/* 竖屏：页面流里的控制区固定可见，不跟画面浮层一起淡出——按钮不能再
+   “直接没有了”。跳过片头浮钮也一样：只在片头窗口内出现，不再被 1.5 秒
+   定时藏起来（它的显隐只由片头窗口管）。横屏旋转态不走这条，仍按上面藏。 */
+@media (orientation: portrait) {
+  .player-main.controls-hidden .player-controls,
+  .player-main.controls-hidden .player-seek-row,
+  .player-main.controls-hidden .skip-intro-btn { opacity: 1; visibility: visible; pointer-events: auto; }
+}
+/* 横屏/竖屏：控制条始终一排、不折行、不互相遮；旋转只改 CSS
+   transform，不重建 video、不丢进度、不重播（见 player.js toggleLandscape）。
+   主排不再横向滑动（2026-11-10 改）：六个按钮 flex 均分一排全部可见。 */
 @media (orientation: landscape) {
   .player-wrap video { max-height: 100vh; }
   .player-controls { flex-wrap: nowrap; }
