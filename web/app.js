@@ -1767,24 +1767,31 @@ async function renderTabPopular(container, initialRegion) {
     const cacheKey = fmtDateYMD(new Date());
     if (isKidsZone) {
       // 少儿：从国漫搜索里分流，完整翻页，不设 20 部上限，按热度排。
+      // 一次 load 只拉一页（20 条 raw）时每页只出 0~7 部少儿（实测 12 页
+      // 才 44 部），滚一次只多几张、0 部那页还卡住不动，看着像坏了。
+      // 所以一次 load 连续翻页，直到凑满 20 部少儿、或翻完、或最多 10 页。
       const region = REGIONS.find((r) => r.key === "cn");
-      const q = new URLSearchParams();
-      q.set("keyword", "");
-      q.set("offset", String(POPULAR_STATE.kidsOffset || 0));
-      q.set("sort", "heat");
-      for (const t of region.tags) q.append("tag", t);
-      const data = await fetchJson("/api/bangumi/search?" + q.toString());
-      if (POPULAR_STATE.epoch !== myEpoch) return;
-      const rawItems = (data && data.items) || [];
-      const rawCount = data && typeof data.rawCount === "number" ? data.rawCount : rawItems.length;
-      POPULAR_STATE.kidsOffset = (POPULAR_STATE.kidsOffset || 0) + rawCount;
-      const known = new Set(POPULAR_STATE.items.map((x) => x.id));
-      for (const it of rawItems) {
-        if (!it || known.has(it.id) || isMotionComic(it) || !isKids(it) || !keepForRegion(it, "cn")) continue;
-        known.add(it.id);
-        POPULAR_STATE.items.push(it);
+      let newKids = 0;
+      for (let page = 0; page < 10 && newKids < 20 && !POPULAR_STATE.exhausted; page++) {
+        const q = new URLSearchParams();
+        q.set("keyword", "");
+        q.set("offset", String(POPULAR_STATE.kidsOffset || 0));
+        q.set("sort", "heat");
+        for (const t of region.tags) q.append("tag", t);
+        const data = await fetchJson("/api/bangumi/search?" + q.toString());
+        if (POPULAR_STATE.epoch !== myEpoch) return;
+        const rawItems = (data && data.items) || [];
+        const rawCount = data && typeof data.rawCount === "number" ? data.rawCount : rawItems.length;
+        POPULAR_STATE.kidsOffset = (POPULAR_STATE.kidsOffset || 0) + rawCount;
+        const known = new Set(POPULAR_STATE.items.map((x) => x.id));
+        for (const it of rawItems) {
+          if (!it || known.has(it.id) || isMotionComic(it) || !isKids(it) || !keepForRegion(it, "cn")) continue;
+          known.add(it.id);
+          POPULAR_STATE.items.push(it);
+          newKids++;
+        }
+        if (rawCount < 20) { POPULAR_STATE.exhausted = true; break; }
       }
-      if (rawCount < 20) POPULAR_STATE.exhausted = true;
       POPULAR_STATE.loadFailed = false;
       cache.set(cacheKey, { items: POPULAR_STATE.items.slice(), offset: POPULAR_STATE.kidsOffset, exhausted: POPULAR_STATE.exhausted });
     } else {
@@ -1868,21 +1875,38 @@ async function renderTabPopular(container, initialRegion) {
         // 单个 id 失败不影响整体（catch 到 null 后过滤掉）。
         const isCn = region.key === "cn";
         const isFirstPage = POPULAR_STATE.items.length === 0 && POPULAR_STATE.kidsItems.length === 0;
-        const q = new URLSearchParams();
-        q.set("keyword", "");
-        q.set("offset", String(POPULAR_STATE.searchOffset || 0));
-        q.set("sort", "heat");
-        for (const t of region.tags) q.append("tag", t);
-        const [searchData, hotItems] = await Promise.all([
-          fetchJson("/api/bangumi/search?" + q.toString()).then((d) => d || {}).catch(() => ({})),
+        // 首屏一次拉两页（40 条 raw），不然首屏只有 20 张、打开看着空；
+        // 后面翻页一次一页。两页并行拉，按 offset 顺序拼。
+        const baseOffset = POPULAR_STATE.searchOffset || 0;
+        const searchOffsets = isFirstPage ? [baseOffset, baseOffset + 20] : [baseOffset];
+        const mkSearchQ = (off) => {
+          const qq = new URLSearchParams();
+          qq.set("keyword", "");
+          qq.set("offset", String(off));
+          qq.set("sort", "heat");
+          for (const t of region.tags) qq.append("tag", t);
+          return qq.toString();
+        };
+        const [searchPages, hotItems] = await Promise.all([
+          Promise.all(searchOffsets.map((off) =>
+            fetchJson("/api/bangumi/search?" + mkSearchQ(off)).then((d) => d || {}).catch(() => null))),
           (isCn && isFirstPage)
             ? Promise.all(CN_HOT_IDS.map((id) => fetchJson("/api/bangumi/" + id).catch(() => null)))
             : Promise.resolve([]),
         ]);
         if (POPULAR_STATE.epoch !== myEpoch) return;
-        const rawItems = searchData.items || [];
-        const rawCount = typeof searchData.rawCount === "number" ? searchData.rawCount : rawItems.length;
-        POPULAR_STATE.searchOffset = (POPULAR_STATE.searchOffset || 0) + rawCount;
+        let rawItems = [];
+        let rawCount = 0;
+        let gotShortPage = false;
+        for (const pg of searchPages) {
+          if (!pg) continue; // 某一页失败不算到底，下一页还能续拉
+          const ri = pg.items || [];
+          const rc = typeof pg.rawCount === "number" ? pg.rawCount : ri.length;
+          rawCount += rc;
+          if (rc < 20) gotShortPage = true;
+          rawItems = rawItems.concat(ri);
+        }
+        POPULAR_STATE.searchOffset = baseOffset + rawCount;
         // 去重（对已显示的主榜+少儿节），再按主导地区标签过滤
         const known = new Set(POPULAR_STATE.items.map((x) => x.id).concat(POPULAR_STATE.kidsItems.map((x) => x.id)));
         const fresh = [];
@@ -1913,8 +1937,9 @@ async function renderTabPopular(container, initialRegion) {
           POPULAR_STATE.items = POPULAR_STATE.items.concat(fresh);
           POPULAR_STATE.kidsItems = [];
         }
-        // 本页原始条数满 20 才继续翻页；不足 20 说明到底了
-        if (rawCount < 20) POPULAR_STATE.exhausted = true;
+        // 某页原始条数不足 20 才到底（首屏拉两页时按单页算，不按 40 算）；
+        // 拉失败的那页不算到底，不然一次网络抖动就永远翻不到底了。
+        if (gotShortPage) POPULAR_STATE.exhausted = true;
         // 首屏不再等回填才渲染：先出卡片（每张卡自带的 refreshAiredCount /
         // backfillSubLine 会在集数回来后把日期行改对），回填在后台跑完
         // 再重绘一次。原来 await 挡住首屏数秒，是 12 张灰占位约 8 秒的主因。
@@ -1923,17 +1948,38 @@ async function renderTabPopular(container, initialRegion) {
             .then(() => { if (POPULAR_STATE.epoch === myEpoch) renderItems(); })
             .catch(() => {});
         }
-      } else {
-        const url = POPULAR_STATE.tag
-          ? "/api/popular?tag=" + encodeURIComponent(POPULAR_STATE.tag)
-          : "/api/popular?offset=" + POPULAR_STATE.items.length;
-        const data = await fetchJson(url);
+      } else if (POPULAR_STATE.tag) {
+        const data = await fetchJson("/api/popular?tag=" + encodeURIComponent(POPULAR_STATE.tag));
         if (POPULAR_STATE.epoch !== myEpoch) return;
         // 动态漫画不进播放器（2026-11-08 用户亲口定）
         const items = (data.items || []).filter((it) => !isMotionComic(it));
         POPULAR_STATE.items = POPULAR_STATE.items.concat(items);
         // tag 模式后端是一次性返回（rank 随机），不再续翻
-        if (POPULAR_STATE.tag || !items.length) POPULAR_STATE.exhausted = true;
+        POPULAR_STATE.exhausted = true;
+      } else {
+        // 首页主榜：首屏一次拉两页（48 条），不然首屏只有 24 张、打开看着空；
+        // 后面翻页一次一页。offset 按已加载的去重后条数推进，并按 id 去重，
+        // 防止某页混进动态漫被滤掉后 offset 错位、同一部番连续出现两次。
+        const isFirstPopular = POPULAR_STATE.items.length === 0;
+        const offsets = isFirstPopular
+          ? [0, 24]
+          : [POPULAR_STATE.items.length];
+        const pages = await Promise.all(offsets.map((off) =>
+          fetchJson("/api/popular?offset=" + off).then((d) => d || {}).catch(() => null)));
+        if (POPULAR_STATE.epoch !== myEpoch) return;
+        const known = new Set(POPULAR_STATE.items.map((x) => x.id));
+        let gotShortPage = false;
+        for (const pg of pages) {
+          if (!pg) continue; // 某一页失败不算到底
+          const ri = pg.items || [];
+          if (ri.length < 24) gotShortPage = true;
+          for (const it of ri) {
+            if (!it || known.has(it.id) || isMotionComic(it)) continue;
+            known.add(it.id);
+            POPULAR_STATE.items.push(it);
+          }
+        }
+        if (gotShortPage) POPULAR_STATE.exhausted = true;
       }
       }
     } catch (e) {
@@ -2664,6 +2710,46 @@ async function renderSearch(params) {
     bodyNode.append(head, list);
   }
 
+  // 隐藏原因拆开算：动态漫是按规则不进站（永远不显示），看过/抛弃是
+  // 开关藏起来的（可以点“显示”放出来）。以前只写“隐藏 N 部”，
+  // 点加载更多也放不出来，用户以为翻页坏了（斗罗大陆 13+7 就是这么来的：
+  // 7 部全是动态漫，加载更多永远放不出来）。
+  function hiddenBreakdown() {
+    const S = SEARCH_STATE;
+    let motion = 0, watched = 0, abandoned = 0;
+    for (const it of S.items) {
+      if (isMotionComic(it)) motion++;
+      else if (S.hideWatched && S.watchedIds.has(it.id)) watched++;
+      else if (S.hideAbandoned && S.abandonedIds.has(it.id)) abandoned++;
+    }
+    return { motion, watched, abandoned };
+  }
+  function searchSummaryText() {
+    const S = SEARCH_STATE;
+    const shown = filterSearchResults(S.items);
+    const hb = hiddenBreakdown();
+    let t = shown.length + " 部番剧";
+    if (hb.motion > 0) t += " · 另有 " + hb.motion + " 部动态漫不进站";
+    if (hb.watched + hb.abandoned > 0) t += " · 已隐藏 " + (hb.watched + hb.abandoned) + " 部（看过/抛弃）";
+    return t;
+  }
+  function renderSub() {
+    const S = SEARCH_STATE;
+    const sub = bodyNode.querySelector(".results-sub");
+    if (!sub) return;
+    sub.innerHTML = "";
+    sub.append(document.createTextNode(S.loading && !S.items.length ? "正在搜索…" : searchSummaryText()));
+    const hb = hiddenBreakdown();
+    if (hb.watched + hb.abandoned > 0) {
+      sub.append(button("显示已隐藏", { variant: "text", small: true, onclick: () => {
+        S.hideWatched = S.hideAbandoned = false;
+        localStorage.setItem("searchHideWatched", "0");
+        localStorage.setItem("searchHideAbandoned", "0");
+        renderResults();
+      } }));
+    }
+  }
+
   // ---- 搜索后：结果头 + 摘要 + 网格 + 分页 ----
   let grid = null, footer = null, rendered = 0;
   function renderResults() {
@@ -2673,7 +2759,6 @@ async function renderSearch(params) {
     bodyNode.innerHTML = "";
     rendered = 0;
     const shown = filterSearchResults(S.items);
-    const hidden = S.items.length - shown.length;
     const sortBtn = button(SEARCH_SORTS[f.sort] || "热度", { variant: "text", small: true, trailingIcon: "expand_more" });
     sortBtn.addEventListener("click", () => openMenu(sortBtn, Object.keys(SEARCH_SORTS).map((k) => ({
       label: SEARCH_SORT_MENU[k], selected: k === f.sort, onclick: () => applyFilters(Object.assign(cloneFilter(f), { sort: k })),
@@ -2682,7 +2767,8 @@ async function renderSearch(params) {
     const summary = filterSummary(f);
     bodyNode.append(
       el("div", { class: "results-head" }, el("div", { class: "results-title" }, "搜索结果"), el("div", { class: "ctrls" }, sortBtn, filterBtn)),
-      el("div", { class: "results-sub" }, S.loading && !S.items.length ? "正在搜索…" : shown.length + " 部番剧" + (hidden > 0 ? " · 隐藏 " + hidden + " 部" : "")));
+      el("div", { class: "results-sub" }));
+    renderSub();
     if (summary) bodyNode.append(el("div", { class: "results-summary" }, summary));
     if (S.loading && !S.items.length) { bodyNode.append(loadingNode("正在搜索番剧", "medium")); return; }
     if (S.error && !S.items.length) {
@@ -2704,7 +2790,9 @@ async function renderSearch(params) {
     }
     grid = el("div", { class: "results-grid" });
     for (const item of shown) grid.append(buildResultCard(item));
-    rendered = S.items.length;
+    // rendered 记的是已上屏的卡片数（过滤后的 shown），以前记 S.items.length
+    //（含被藏起来的动态漫），续拉时 rendered 早就超过新长度，新卡永远加不进来。
+    rendered = shown.length;
     footer = el("div", { class: "results-more" });
     bodyNode.append(grid, footer);
     renderFooter();
@@ -2721,12 +2809,12 @@ async function renderSearch(params) {
   function appendNew() {
     const S = SEARCH_STATE;
     if (!grid) { renderResults(); return; }
-    const sub = bodyNode.querySelector(".results-sub");
+    renderSub();
+    // 按过滤后的可见列表追加，rendered 是已上屏的卡片数；
+    // 以前按 S.items 的下标续，动态漫占了下标，新卡加不进来。
     const shown = filterSearchResults(S.items);
-    if (sub) sub.textContent = shown.length + " 部番剧" + (S.items.length - shown.length > 0 ? " · 隐藏 " + (S.items.length - shown.length) + " 部" : "");
-    for (; rendered < S.items.length; rendered++) {
-      const it = S.items[rendered];
-      if (filterSearchResults([it]).length) grid.append(buildResultCard(it));
+    for (; rendered < shown.length; rendered++) {
+      grid.append(buildResultCard(shown[rendered]));
     }
     renderFooter();
   }
@@ -2742,6 +2830,7 @@ async function renderSearch(params) {
     if (reset) renderResults(); else renderFooter();
     try {
       for (let pages = 0; pages < 3; pages++) {
+        const prevVisible = filterSearchResults(S.items).length;
         const data = await fetchJson(searchQueryUrl(S.submitted, S.offset));
         if (S.generation !== gen) return;
         const raw = data.items || [];
@@ -2756,7 +2845,11 @@ async function renderSearch(params) {
         }
         S.offset += rawCount;
         S.hasMore = rawCount === SEARCH_PAGE_SIZE;
-        if (fresh.length || !S.hasMore) break;
+        // 本页没带来新的可见条目（全是动态漫/服务端单字模糊匹配的无关结果）
+        // 就自动续拉，最多 3 页；以前按原始 fresh 计数，有新条目就停，
+        // 哪怕新条目全被筛掉——点“加载更多”就什么都不出，还以为翻页坏了。
+        const newVisible = filterSearchResults(S.items).length - prevVisible;
+        if (newVisible > 0 || !S.hasMore) break;
       }
     } catch (e) {
       if (S.generation !== gen) return;
@@ -3592,7 +3685,8 @@ async function loadRoadsAndHistory(plugin, src, bid) {
 function playEpisodeParams(ctx, ep, epIdx, roadIdx) {
   const pp = {
     plugin: ctx.plugin, episodeUrl: ep.src,
-    title: (ctx.title ? ctx.title + " · " : "") + ep.name,
+    // 集名可能为 null：直接拼会出 "第 X 集 null" 一类的标题，用“第 N 集”兜底。
+    title: (ctx.title ? ctx.title + " · " : "") + (ep.name || ("第" + (epIdx + 1) + "集")),
     episode: String(epIdx + 1), road: String(roadIdx), src: ctx.src,
   };
   if (ctx.bid) pp.bid = ctx.bid;
@@ -3681,14 +3775,16 @@ function episodePanel(ctx) {
       const ep = eps[i];
       const m = ep.name ? String(ep.name).match(/\d+/) : null;
       const num = m ? parseInt(m[0], 10) : i + 1;
+      // 有些源的集名是 null：直接拼会出 "null"（title/aria-label 里），用“第 N 集”兜底。
+      const epLabel = ep.name || ("第" + (i + 1) + "集");
       let sub = "";
       if (i === playing) sub = "正在播放";
       else if (i === lastIdx) sub = lw.progressMs > 0 ? "上次看到 " + formatPosition(lw.progressMs) : "上次观看";
       const cell = el("button", {
         class: "ep-cell sl" + (i === currentIdx ? " is-current" : "") + (i === playing ? " is-playing" : ""),
         type: "button", "data-ep": String(i + 1),
-        title: ep.name + (sub ? " · " + sub : ""),
-        "aria-label": ep.name + (sub ? "，" + sub : ""),
+        title: epLabel + (sub ? " · " + sub : ""),
+        "aria-label": epLabel + (sub ? "，" + sub : ""),
         onclick: () => { if (i !== playing) go("/play", playEpisodeParams(ctx, ep, i, activeRoadIdx)); },
       }, String(num));
       grid.append(cell);
@@ -3749,11 +3845,12 @@ function episodePanel(ctx) {
         onclick: () => go("/play", playEpisodeParams(ctx, lastEp, lastIdx, activeRoadIdx)),
       }, "上次看到第 " + lastNum + " 集" + prog + "，点一下继续看");
     }
-    root.append(resumeBanner, routeBtn,
-      el("div", { class: "ep-toolbar" }, el("span", { class: "ep-count" }, "全部剧集 · " + eps.length + " 集"), locate),
-      controls,
-      segBar,
-      grid);
+    const toolbar = el("div", { class: "ep-toolbar" }, el("span", { class: "ep-count" }, "全部剧集 · " + eps.length + " 集"), locate);
+    // 注意：这里是原生 Node.append，不是 el()——传 null 会被转成 "null"
+    // 文本节点直接显示出来（选集栏下多处孤立 "null" 就是这么来的：
+    // 没观看记录时 resumeBanner 是 null，≤50 集时 segBar 是 null）。
+    // el() 会跳过 null，原生 append 不会，所以先过滤。
+    root.append(...[resumeBanner, routeBtn, toolbar, controls, segBar, grid].filter(Boolean));
   }
   render();
   return root;
@@ -3791,7 +3888,8 @@ function episodeCommentsPanel(bid, initialEpisode) {
     list.append(loadingNode("", "medium"));
     fetchJson("/api/bangumi/" + bid + "/episode-comments?episode=" + activeEpisode).then((data) => {
       cachedList = data.items || [];
-      if (data.episode) epInfoSub.textContent = data.episode.readType + "." + data.episode.episode + " " + (data.episode.nameCn || data.episode.name || "");
+      // readType/episode 可能为 null：直接拼会出 "null.1 …"，"undefined.1 …"。
+      if (data.episode) epInfoSub.textContent = (data.episode.readType != null ? data.episode.readType + "." : "") + (data.episode.episode != null ? data.episode.episode : "") + " " + (data.episode.nameCn || data.episode.name || "");
       renderList();
     }).catch(() => {
       list.innerHTML = "";
@@ -3808,7 +3906,7 @@ function episodeCommentsPanel(bid, initialEpisode) {
         body.append(splitList(items.map((it, idx) => {
           const isCur = idx + 1 === activeEpisode;
           return splitRow(el("div", { class: "ep-row" + (isCur ? " is-current" : "") },
-            el("div", { class: "body" }, el("div", { class: "name" }, it.readType + "." + it.episode + " " + (it.nameCn || it.name || "")))),
+            el("div", { class: "body" }, el("div", { class: "name" }, (it.readType != null ? it.readType + "." : "") + (it.episode != null ? it.episode : "") + " " + (it.nameCn || it.name || "")))),
             { onclick: () => { activeEpisode = idx + 1; close(); load(); } });
         }), { tight: true, r20: true }));
       }).catch((e) => {
@@ -4016,18 +4114,25 @@ async function renderTabMy(container) {
   // 14 Pro 竖屏应显示 393×852、横屏 852×393；对不上就是适配没生效的证据。
   {
     const vp = logViewport();
+    // 历史记录里可能混进缺字段的旧条目：直接拼会出 "undefined×undefined"、
+    // "Invalid Date"，只留 w/h 都是数字、时间能解析的条目。
     const entries = viewportLogEntries().slice(-3).map((e) => {
+      if (!e || typeof e.w !== "number" || typeof e.h !== "number") return "";
       let tm = "";
-      try { tm = new Date(e.t).toLocaleTimeString(); } catch (_) {}
-      return e.w + "×" + e.h + " " + tm;
-    }).join(" · ");
+      if (e.t) {
+        const d = new Date(e.t);
+        if (!isNaN(d.getTime())) { try { tm = d.toLocaleTimeString(); } catch (_) {} }
+      }
+      return e.w + "×" + e.h + (tm ? " " + tm : "");
+    }).filter(Boolean).join(" · ");
+    const vpText = vp ? vp.w + "×" + vp.h + " · " + (vp.orient === "portrait" ? "竖屏" : "横屏") + " · DPR " + vp.dpr : "未知";
     page.append(section({
       title: "屏幕适配",
       desc: "本机视口记录，仅供调试，不发服务端",
       rows: [splitRow(tile({
         icon: "smartphone",
         title: "当前视口",
-        desc: (vp ? vp.w + "×" + vp.h + " · " + (vp.orient === "portrait" ? "竖屏" : "横屏") + " · DPR " + vp.dpr : "未知") + (entries ? " ｜ 最近：" + entries : ""),
+        desc: vpText + (entries ? " ｜ 最近：" + entries : ""),
       }))],
     }));
   }

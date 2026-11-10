@@ -376,7 +376,7 @@ select.btn {
 .tile .tile-badge svg { width: 18px; height: 18px; }
 .tile .tile-body { flex: 1; min-width: 0; }
 .tile .tile-title { font-size: var(--body-large-size); line-height: var(--body-large-height); letter-spacing: var(--body-large-letter-spacing); color: var(--on-surface); }
-.tile .tile-desc { margin-top: 2px; font-size: var(--body-small-size); line-height: var(--body-small-height); color: var(--on-surface-variant); }
+.tile .tile-desc { margin-top: 2px; font-size: var(--body-small-size); line-height: var(--body-small-height); color: var(--on-surface-variant); overflow-wrap: anywhere; }
 .tile .tile-value { font-size: var(--body-medium-size); color: var(--on-surface-variant); }
 .tile .tile-trailing { display: inline-flex; align-items: center; color: var(--on-surface-variant); }
 .tile .tile-trailing svg { width: 24px; height: 24px; }

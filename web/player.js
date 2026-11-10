@@ -1271,7 +1271,7 @@ async function renderPlayer(params) {
       toast("已自动换源，正在解析…");
       go("/play", {
         plugin: next.plugin, episodeUrl: next.ep.src,
-        title: (seriesName ? seriesName + " · " : "") + next.ep.name,
+        title: (seriesName ? seriesName + " · " : "") + (next.ep.name || ("第" + epNum + "集")),
         episode: String(epNum), road: "0", src: next.src,
         bid: bid || undefined, fb: [...tried, next.plugin].join(","),
       });
@@ -1556,7 +1556,7 @@ async function renderPlayer(params) {
         const dm = await fetchJson("/api/danmaku/episode?episodeId=" + encodeURIComponent(pick.episodeId));
         danmaku.load(dm.items || []);
         danmakuDesc.textContent = "共 " + danmaku.count + " 条";
-        sourceTile.querySelector(".tile-desc").textContent = pick.animeTitle + " · " + (pick.episodeTitle || "");
+        sourceTile.querySelector(".tile-desc").textContent = (pick.animeTitle || "未命名") + " · " + (pick.episodeTitle || "");
         toast("已切换弹幕源，共 " + danmaku.count + " 条");
       } catch (e) {
         danmakuDesc.textContent = "弹幕加载失败";
@@ -1630,14 +1630,20 @@ async function renderPlayer(params) {
       const prog = h.history && h.history.progresses && h.history.progresses[String(epNum)];
       if (prog && prog.progressMs > 5000) {
         const seekTo = prog.progressMs / 1000;
+        let resumed = false;
         const doSeek = () => {
+          const d = video.duration;
+          // 断点已到片尾（离结束不到 5 秒）：从头播，别停在黑屏片尾。
+          // 上次播到片尾存下的断点就是 23:36=总时长，直接 seek 到片尾会
+          // 立刻 ended、画面黑在 0:00 没声——这就是斗破第 1 集黑屏的原因。
+          if (Number.isFinite(d) && seekTo >= d - 5) return;
           if (Math.abs((video.currentTime || 0) - seekTo) > 2) {
             try { video.currentTime = seekTo; } catch (_) {}
           }
+          if (!resumed) { resumed = true; toast("已从 " + formatPosition(prog.progressMs) + " 继续播放"); }
         };
         if (video.readyState >= 1) doSeek();
         else video.addEventListener("loadedmetadata", doSeek, { once: true });
-        toast("已从 " + formatPosition(prog.progressMs) + " 继续播放");
       }
     } catch (_) {}
 
@@ -1661,6 +1667,23 @@ async function renderPlayer(params) {
     activeProgressTimer = setInterval(send, 5000);
     video.addEventListener("pause", send);
     window.addEventListener("pagehide", send, { once: true });
+    // 播到片尾：把本集断点清零，别再存一个“23:36=总时长”的断点，
+    // 否则下次打开又要靠守卫拦一次。清不掉也不怕，守卫还在。
+    video.addEventListener("ended", () => {
+      try {
+        reportProgress({
+          bangumiId: parseInt(bid, 10),
+          pluginName: plugin,
+          episode: epNum,
+          road: roadNum,
+          progressMs: 0,
+          lastSrc: episodeUrl,
+          episodeName: epName,
+          deviceId: getDeviceId(),
+          src: src || "",
+        });
+      } catch (_) {}
+    });
   }
 
   // ====== 自动播放：解析完就播，不停在暂停 ======
