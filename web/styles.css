@@ -1056,6 +1056,7 @@ select.btn {
 .ep-cell { min-height: 48px; padding: 0 4px; border-radius: 14px; border: 1px solid var(--outline-variant); background: var(--surface-container); color: var(--on-surface); font-size: 16px; font-weight: 600; cursor: pointer; }
 .ep-cell:active { transform: scale(0.96); }
 .ep-cell.is-current { background: var(--primary); color: var(--on-primary); border-color: transparent; font-weight: 700; }
+.ep-cell.is-jump-target { outline: 2px solid var(--primary); outline-offset: 1px; }
 .ep-cell.is-playing::after { content: " ▶"; font-size: 11px; }
 .player-panel .ep-controls { top: 56px; }
 

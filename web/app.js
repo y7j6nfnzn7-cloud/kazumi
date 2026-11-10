@@ -121,7 +121,10 @@ function el(tag, attrs, ...children) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k === "onclick") node.addEventListener("click", v);
     else if (k === "class") node.className = v;
-    else if (k === "html") node.innerHTML = v;
+    // html 为 null/undefined 时不赋值：直接 innerHTML = undefined 会被转成
+    // 字面量 "undefined" 文本显示出来（“我的”页视口栏 tile-leading 用了
+    // 未定义的 smartphone 图标就是这么出的 "undefi当前视口" 重叠）。
+    else if (k === "html") { if (v != null) node.innerHTML = v; }
     else if (v === true) node.setAttribute(k, "");
     else if (v === false || v == null) continue;
     else node.setAttribute(k, v);
@@ -352,6 +355,7 @@ const ICONS = {
   cloud_off: '<svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-1.48 0-2.85.43-4.01 1.17l1.46 1.46C10.21 6.23 11.08 6 12 6c3.04 0 5.5 2.46 5.5 5.5v.5H19c1.66 0 3 1.34 3 3 0 1.13-.64 2.11-1.56 2.62l1.45 1.45C23.16 18.16 24 16.68 24 15c0-2.64-2.05-4.78-4.65-4.96zM3 5.27l2.75 2.74C2.56 8.15 0 10.77 0 14c0 3.31 2.69 6 6 6h11.73l2 2L21 20.73 4.27 4 3 5.27zM7.73 10l8 8H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h1.73z"/></svg>',
   content_copy: '<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>',
   account_tree: '<svg viewBox="0 0 24 24"><path d="M22 11V3h-7v3H9V3H2v8h7V8h2v10h4v3h7v-8h-7v3h-2V8h2v3z"/></svg>',
+  smartphone: '<svg viewBox="0 0 24 24"><path d="M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-2-2-2zm0 18H7V5h10v14z"/></svg>',
 };
 // 图标统一包在 span.icon 里，尺寸由 .icon svg 规则控制
 function iconNode(name) {
@@ -3682,11 +3686,22 @@ async function loadRoadsAndHistory(plugin, src, bid) {
   }
   return { roads, lastWatched };
 }
+// 集名里的数字不可信（源站会跳号/插特辑）：guangsu 斗破年番 101/102 位是
+// “总集篇上/总结篇下”（无数字），之后集名全部比位置小 2。显示用集名时只
+// 有两种情况可信——集名没有数字（特辑名本身，如“总集篇上”）、或集名数字
+// 与位置一致；数字对不上位置时用位置“第 N 集”，否则点 220 播的却是“第218集”。
+function epDisplayName(ep, idx) {
+  const name = ep && ep.name ? String(ep.name) : "";
+  if (!name) return "第" + (idx + 1) + "集";
+  const m = name.match(/\d+/);
+  if (m && parseInt(m[0], 10) !== idx + 1) return "第" + (idx + 1) + "集";
+  return name;
+}
 function playEpisodeParams(ctx, ep, epIdx, roadIdx) {
   const pp = {
     plugin: ctx.plugin, episodeUrl: ep.src,
     // 集名可能为 null：直接拼会出 "第 X 集 null" 一类的标题，用“第 N 集”兜底。
-    title: (ctx.title ? ctx.title + " · " : "") + (ep.name || ("第" + (epIdx + 1) + "集")),
+    title: (ctx.title ? ctx.title + " · " : "") + epDisplayName(ep, epIdx),
     episode: String(epIdx + 1), road: String(roadIdx), src: ctx.src,
   };
   if (ctx.bid) pp.bid = ctx.bid;
@@ -3773,10 +3788,15 @@ function episodePanel(ctx) {
     const grid = el("div", { class: "ep-grid" });
     for (const i of shownIdxs) {
       const ep = eps[i];
-      const m = ep.name ? String(ep.name).match(/\d+/) : null;
-      const num = m ? parseInt(m[0], 10) : i + 1;
-      // 有些源的集名是 null：直接拼会出 "null"（title/aria-label 里），用“第 N 集”兜底。
-      const epLabel = ep.name || ("第" + (i + 1) + "集");
+      // 集号以位置为准（i+1），不从集名里抠数字：源站集名不可靠——guangsu
+      // 斗破年番 101/102 位是“总集篇上/总结篇下”（无数字），之后集名全部
+      // 比位置小 2，第 201–220 段会被标成 199–218，219/220 看着像没了；
+      // 而播放、历史、续播、data-ep 全按位置计，标签必须跟它们一致。
+      const num = i + 1;
+      // 有些源的集名是 null：直接拼会出 "null"（title/aria-label 里），用“第 N 集”兜底；
+      // 集名数字与位置对不上时也按位置显示（见 epDisplayName），否则 220 集的
+      // 悬浮提示会写成“第218集”。
+      const epLabel = epDisplayName(ep, i);
       let sub = "";
       if (i === playing) sub = "正在播放";
       else if (i === lastIdx) sub = lw.progressMs > 0 ? "上次看到 " + formatPosition(lw.progressMs) : "上次观看";
@@ -3812,7 +3832,13 @@ function episodePanel(ctx) {
       rangeIdx = Math.floor((n - 1) / EP_PAGE);
       render();
       const cell = root.querySelector('.ep-cell[data-ep="' + n + '"]');
-      if (cell) cell.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (cell) {
+        cell.scrollIntoView({ behavior: "smooth", block: "center" });
+        // 只滚动不够：目标段本来就显示时滚动无可见变化，看着像“跳了没反应”；
+        // 给目标格描边高亮 1.8 秒，让跳落点一眼可见。
+        cell.classList.add("is-jump-target");
+        setTimeout(() => cell.classList.remove("is-jump-target"), 1800);
+      }
     } });
     const controlsChildren = [sortBtn, latestBtn, el("div", { class: "ep-jump" }, jumpInput, jumpBtn)];
     // 分段快捷条（2026-11-09 用户亲口定）：集数多（>50 集）时可见，每 50 集一段，
@@ -3837,8 +3863,9 @@ function episodePanel(ctx) {
     let resumeBanner = null;
     if (lastIdx >= 0 && lastIdx !== playing) {
       const lastEp = eps[lastIdx];
-      const lm = lastEp && lastEp.name ? String(lastEp.name).match(/\d+/) : null;
-      const lastNum = lm ? parseInt(lm[0], 10) : lastIdx + 1;
+      // “上次看到第 X 集”同样按位置计（lastIdx+1），不从集名抠数字，
+      // 否则集名错位时会报小 2 集（同上）。
+      const lastNum = lastIdx + 1;
       const prog = lw.progressMs > 0 ? " · 上次看到 " + formatPosition(lw.progressMs) : "";
       resumeBanner = el("button", {
         class: "ep-resume sl", type: "button",
