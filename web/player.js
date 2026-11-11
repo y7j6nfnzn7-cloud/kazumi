@@ -1527,6 +1527,27 @@ async function renderPlayer(params) {
     if (!sw.switched) showError("播放器报告错误。可能是源失效或浏览器不支持该格式。");
   });
 
+  // 卡住检测：解析成功但分片拉不下来时，video 不报 error，只会一直转圈
+  // （2026-11-11 吞噬星空：光速解析 0.2 秒成功，分片在 gs.gszyi.com:999 上，
+  // 手机上每一次都打不开，桌面却能播）。20 秒内进度一动不动就当卡住，自动换源。
+  let stallTimer = null, stallLastTime = -1, stallLastCheck = Date.now();
+  const armStallWatch = () => {
+    clearInterval(stallTimer);
+    stallLastTime = video.currentTime; stallLastCheck = Date.now();
+    stallTimer = setInterval(() => {
+      if (!video.isConnected) { clearInterval(stallTimer); return; }
+      if (videoSwitching || video.paused || video.ended) return;
+      if (video.currentTime !== stallLastTime) { stallLastTime = video.currentTime; stallLastCheck = Date.now(); return; }
+      if (Date.now() - stallLastCheck > 20000) {
+        clearInterval(stallTimer);
+        videoSwitching = true;
+        autoSwitchSource(plugin).then((sw) => { if (!sw.switched) showError("视频一直加载不出来，换了其他源也播不出来。"); });
+      }
+    }, 2000);
+  };
+  video.addEventListener("playing", () => { stallLastTime = video.currentTime; stallLastCheck = Date.now(); });
+  armStallWatch();
+
   // ====== 弹幕：SettingsSection（开关 + 三个 slider tile） ======
   const danmaku = new DanmakuLayer(video, playerWrap);
   activeDanmaku = danmaku;
