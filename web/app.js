@@ -3508,17 +3508,28 @@ function titleMatchScore(itemName, title) {
   }
   // 源站名比标题短、是标题的前缀（如源站只有“斗破苍穹年番”，标题是“斗破苍穹 年番4”）：
   // 算弱匹配，宁可播同系列正片也不弹手动表；短于 4 字的前缀不算（太容易误撞）。
-  if (t.indexOf(n) === 0 && n.length >= 4) return 30;
+  // 条目带标题里也有的季标记（如标题“斗破苍穹 年番4”、条目“斗破苍穹 年番”）
+  // 是同系列同季线，比裸标题更贴切，给 60 分。
+  if (t.indexOf(n) === 0 && n.length >= 4) {
+    for (const m of TITLE_EXTRA_MARKERS) {
+      const nm = normalizeTitle(m);
+      if (nm && t.indexOf(nm) >= 0 && n.indexOf(nm) >= 0) return 60;
+    }
+    return 30;
+  }
   if (n.indexOf(t) >= 0) return 20;
   return -100;
 }
-function pickBestSearchItem(items, titles) {
-  // titles：[nameCn, name]，取两者中最好的匹配分；同分取原顺序靠前的。
+function pickBestSearchItem(items, titles, baseTitle) {
+  // titles：[nameCn, name] 平等取最高分；baseTitle（去季后缀的裸标题）只算弱匹配：
+  // 裸标题同名顶多 50 分，不能压过带相同季标记的条目（如“斗破苍穹 年番”对
+  // “斗破苍穹 年番4”得 60 分），否则季标题总会错挑成第一季的切片。
   let best = null;
   for (let i = 0; i < (items || []).length; i++) {
     const it = items[i];
     let score = -100;
     for (const t of titles) score = Math.max(score, titleMatchScore(it && it.name, t));
+    if (baseTitle) score = Math.max(score, titleMatchScore(it && it.name, baseTitle) - 50);
     if (!best || score > best.score) best = { item: it, score: score, index: i };
   }
   return best;
@@ -3534,14 +3545,14 @@ function stripSeasonSuffix(title) {
 async function pluginSearchBest(pluginName, titles) {
   // 先用完整标题搜；搜不到可用的，就去掉季后缀用裸标题再搜一次。
   // 返回 { items, best }：best 是按标题匹配度挑出的最优条目（可能分很低或 null）。
-  const items = await pluginSearchSingle(pluginName, titles[0]);
-  let best = pickBestSearchItem(items, titles);
-  if (best && best.score >= 20) return { items, best };
   const base = stripSeasonSuffix(titles[0]);
+  const items = await pluginSearchSingle(pluginName, titles[0]);
+  let best = pickBestSearchItem(items, titles, base);
+  if (best && best.score >= 20) return { items, best };
   if (base) {
     try {
       const items2 = await pluginSearchSingle(pluginName, base);
-      const best2 = pickBestSearchItem(items2, titles.concat([base]));
+      const best2 = pickBestSearchItem(items2, titles, base);
       if (best2 && best2.score >= 20) return { items: items2, best: best2 };
     } catch (_) {}
   }
@@ -3606,7 +3617,28 @@ async function autoPlayBangumi(bangumi) {
       return (b.best.score - a.best.score) || (ca - cb) || (a.ms - b.ms);
     });
   let usable = ok;
-  const fresh = ok.filter((r) => !pluginFailedRecently(r.name));
+  // 2026-11-11：已完结的番再验选集数——同一源站可能有同名重复条目，其中一个是
+  // 残缺镜像（如一人之下 S6 在 MXdm 有 2 集和 26 集两个同名条目），只凭标题分
+  // 会撞上残缺的。已完结且总集数已知时，并行取各候选源的选集数，少于总数一半
+  // 的不首选；更新中的番不验（集数本来就没出全）；全部都不够时不过滤（宁可播也别弹表）。
+  try {
+    const label = updateLineFor(bangumi) || "";
+    const total = parseInfoEps(bangumi.info);
+    if (label.indexOf("已完结") === 0 && total) {
+      const need = Math.max(2, Math.floor(total * 0.5));
+      const checks = await Promise.all(usable.map(async (r) => {
+        try {
+          const info = await loadRoadsAndHistory(r.name, r.best.item.src, String(bangumi.id));
+          const roads = (info && info.roads) || [];
+          const n = roads.length ? Math.max.apply(null, roads.map((x) => ((x.episodes || []).length))) : 0;
+          return n >= need;
+        } catch (_) { return true; } // 查不到就不拦（别因为一次查询失败就把源排除）
+      }));
+      const kept = usable.filter((_, i) => checks[i]);
+      if (kept.length) usable = kept;
+    }
+  } catch (_) {}
+  const fresh = usable.filter((r) => !pluginFailedRecently(r.name));
   if (fresh.length) usable = fresh;
   if (usable.length) {
     const best = usable[0];

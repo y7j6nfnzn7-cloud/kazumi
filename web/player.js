@@ -1235,6 +1235,53 @@ async function renderPlayer(params) {
   let data;
   let resolveMs = 0;
   const resolveStart = performance.now();
+  // 自动换源（解析失败 / 播放器报错共用）：记下失败源，24 小时内不再首选它；
+  // 按干净度+延迟试别的源同一集，试出来就跳过去；都试不出返回 { switched:false, hadOthers }。
+  // fb 记录已试过的源，防止来回跳；同一集内最多把 5 个源各试一次。
+  const switchTried = new Set((params.fb || "").split(",").filter(Boolean));
+  async function autoSwitchSource(failedPlugin) {
+    markPluginParseFailed(failedPlugin);
+    switchTried.add(failedPlugin);
+    const seriesName = (title || "").split(" · ").slice(0, -1).join(" · ") || title || "";
+    let hadOthers = false;
+    try {
+      const plugins = await fetchJson("/api/plugins");
+      let latMap = {};
+      try { latMap = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {}; } catch (_) {}
+      let clean = { clean: {}, dirty: [] };
+      try { clean = await loadCleanSources(); } catch (_) {}
+      const _orderedAll = orderPluginsCleanFirst(plugins, clean, seriesName, bid)
+        .sort((a, b) => {
+          const ca = (clean.clean && clean.clean[a.name]) ? 0 : 1;
+          const cb = (clean.clean && clean.clean[b.name]) ? 0 : 1;
+          return (ca - cb) || ((latMap[a.name] == null ? 1e9 : latMap[a.name]) - (latMap[b.name] == null ? 1e9 : latMap[b.name]));
+        });
+      const _fresh = _orderedAll.filter((p) => !pluginFailedRecently(p.name));
+      const orderedFinal = _fresh.length ? _fresh : _orderedAll;
+      for (const p of orderedFinal) {
+        if (switchTried.has(p.name)) continue;
+        hadOthers = true;
+        let r = null;
+        try { r = await pluginSearchBest(p.name, [seriesName]); } catch (_) { continue; }
+        const best = r && r.best;
+        if (!best || best.score < 20) continue;
+        let info = null;
+        try { info = await loadRoadsAndHistory(p.name, best.item.src, bid); } catch (_) { continue; }
+        const eps = ((info.roads || [])[0] || {}).episodes || [];
+        if (!eps[epNum - 1]) continue;
+        localStorage.setItem("lastPlugin", p.name);
+        toast("已自动换源，正在解析…");
+        go("/play", {
+          plugin: p.name, episodeUrl: eps[epNum - 1].src,
+          title: (seriesName ? seriesName + " · " : "") + (eps[epNum - 1].name || ("第" + epNum + "集")),
+          episode: String(epNum), road: "0", src: best.item.src,
+          bid: bid || undefined, fb: [...switchTried, p.name].join(","),
+        });
+        return { switched: true, hadOthers };
+      }
+    } catch (_) { /* 拿规则列表失败就直接报错 */ }
+    return { switched: false, hadOthers };
+  }
   try {
     // 解析 20 秒超时：一次 504 不能拖 35 秒；超时按解析失败走自动换源。
     const rc = new AbortController();
@@ -1253,64 +1300,13 @@ async function renderPlayer(params) {
     // 解析成功：清除该源的失败记录（会话内 + 24h），下次自动选源不再跳过它。
     clearPluginParseFailed(plugin);
   } catch (e) {
-    // 这个源解析失败（比如 AGE 某条目 20 秒超时 504）：记下失败时间，
-    // 24 小时内自动选源不再首选它（MXdm 检索最快但解析次次 504，
-    // 再首选它只会白等 20 秒）。再自动换别的源试同一集，
+    // 这个源解析失败（比如 AGE 某条目 20 秒超时 504）：自动换别的源试同一集，
     // 不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
-    markPluginParseFailed(plugin);
-    // 同一集，不让用户自己回去选源（2026-11-09 用户定：哪个能播用哪个）。
-    // fb 记录已试过的源，防止 AGE→MXdm→AGE 来回跳。
-    const tried = new Set((params.fb || "").split(",").filter(Boolean).concat([plugin]));
-    const seriesName = (title || "").split(" · ").slice(0, -1).join(" · ") || title || "";
     status.textContent = "这个源播不出来，正在自动换别的源试同一集…";
-    let next = null;
-    let hadOthers = false;
-    try {
-      const plugins = await fetchJson("/api/plugins");
-      let latMap = {};
-      try { latMap = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {}; } catch (_) {}
-      // 换源循环也要查 24h/会话内失败黑名单（原来只按延迟排，刚失败的源
-      // 搜得快还会排前面再失败一次），干净源优先。
-      let clean = { clean: {}, dirty: [] };
-      try { clean = await loadCleanSources(); } catch (_) {}
-      // 优先未失败源，全部都失败过时才放宽（与 autoPlayBangumi 同一规则）。
-      const _orderedAll = orderPluginsCleanFirst(plugins, clean, seriesName, bid)
-        .sort((a, b) => {
-          const ca = (clean.clean && clean.clean[a.name]) ? 0 : 1;
-          const cb = (clean.clean && clean.clean[b.name]) ? 0 : 1;
-          return (ca - cb) || ((latMap[a.name] == null ? 1e9 : latMap[a.name]) - (latMap[b.name] == null ? 1e9 : latMap[b.name]));
-        });
-      const _fresh = _orderedAll.filter((p) => !pluginFailedRecently(p.name));
-      const orderedFinal = _fresh.length ? _fresh : _orderedAll;
-      // 用 orderedFinal 替代 ordered 继续走下面的循环
-      const ordered2 = orderedFinal;
-      for (const p of ordered2) {
-        if (tried.has(p.name)) continue;
-        hadOthers = true;
-        let items = [];
-        try { items = await pluginSearchSingle(p.name, seriesName); } catch (_) { continue; }
-        if (!items.length) continue;
-        let info = null;
-        try { info = await loadRoadsAndHistory(p.name, items[0].src, bid); } catch (_) { continue; }
-        const eps = ((info.roads || [])[0] || {}).episodes || [];
-        if (!eps[epNum - 1]) continue;
-        next = { plugin: p.name, src: items[0].src, ep: eps[epNum - 1] };
-        break;
-      }
-    } catch (_) { /* 拿规则列表失败就直接报错 */ }
-    if (next) {
-      localStorage.setItem("lastPlugin", next.plugin);
-      toast("已自动换源，正在解析…");
-      go("/play", {
-        plugin: next.plugin, episodeUrl: next.ep.src,
-        title: (seriesName ? seriesName + " · " : "") + (next.ep.name || ("第" + epNum + "集")),
-        episode: String(epNum), road: "0", src: next.src,
-        bid: bid || undefined, fb: [...tried, next.plugin].join(","),
-      });
-      return;
-    }
+    const sw = await autoSwitchSource(plugin);
+    if (sw.switched) return;
     status.remove();
-    page.append(errorState({ title: "解析失败", message: hadOthers ? "这个源播不出来，换了其他源也播不出来：" + e.message : e.message, onRetry: () => renderPlayer(params) }));
+    page.append(errorState({ title: "解析失败", message: sw.hadOthers ? "这个源播不出来，换了其他源也播不出来：" + e.message : e.message, onRetry: () => renderPlayer(params) }));
     return;
   }
   status.remove();
@@ -1521,8 +1517,14 @@ async function renderPlayer(params) {
     : data.streamType === "mp4" ? "MP4" : "直链";
   main.append(el("div", { class: "player-meta" }, "规则 " + data.pluginName + " · " + typeLabel + " · 延迟 " + (resolveMs / 1000).toFixed(1) + " 秒"));
 
-  video.addEventListener("error", () => {
-    showError("播放器报告错误。可能是源失效或浏览器不支持该格式。");
+  let videoSwitching = false;
+  video.addEventListener("error", async () => {
+    // 播放器报错（如 7sefun 的 MP4 死链）也自动换源，不直接报死（2026-11-11 斗破年番4
+    // 7sefun 黑屏就是只报了错没换源）。video error 可能连着触发，只换一次。
+    if (videoSwitching) return;
+    videoSwitching = true;
+    const sw = await autoSwitchSource(plugin);
+    if (!sw.switched) showError("播放器报告错误。可能是源失效或浏览器不支持该格式。");
   });
 
   // ====== 弹幕：SettingsSection（开关 + 三个 slider tile） ======
