@@ -534,7 +534,7 @@ let SKIP_POINTS_CACHE = null;
 async function loadSkipPoints() {
   if (SKIP_POINTS_CACHE) return SKIP_POINTS_CACHE;
   try {
-    const r = await fetch("/assets/skip-points.json");
+    const r = await fetch("/assets/skip-points.json", { cache: "no-store" }); // 服务端对 /assets/*.json 发 7 天缓存（Cache-Control: max-age=604800），不加 no-store 会读到旧表，标定不生效。
     if (!r.ok) throw new Error("no skip table");
     SKIP_POINTS_CACHE = await r.json();
   } catch (_) { SKIP_POINTS_CACHE = { points: {}, candidates: {} }; }

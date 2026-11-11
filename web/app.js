@@ -209,7 +209,7 @@ let CLEAN_SOURCES_CACHE = null;
 async function loadCleanSources() {
   if (CLEAN_SOURCES_CACHE) return CLEAN_SOURCES_CACHE;
   try {
-    const r = await fetch("/assets/clean-sources.json");
+    const r = await fetch("/assets/clean-sources.json", { cache: "no-store" }); // 同 skip-points：服务端 7 天缓存，不加 no-store 会读旧表。
     if (!r.ok) throw new Error("no clean table");
     CLEAN_SOURCES_CACHE = await r.json();
   } catch (_) { CLEAN_SOURCES_CACHE = { clean: {}, dirty: [] }; }
@@ -1168,7 +1168,7 @@ const CN_HOT_IDS_BUILTIN = [
 let CN_HOT_IDS = CN_HOT_IDS_BUILTIN.slice();
 async function loadHotList() {
   try {
-    const r = await fetch("/assets/hot-list.json");
+    const r = await fetch("/assets/hot-list.json", { cache: "no-store" }); // 同 skip-points：服务端 7 天缓存，不加 no-store 会读旧榜。
     if (!r.ok) return; // 失败就用内置数组，不挡站
     const data = await r.json();
     const ids = (data && data.ids) || [];
