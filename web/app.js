@@ -729,18 +729,18 @@ function parseInfoEps(info) {
 const STILL_AIRING = {
   "244239": { episodes: 249, weekday: 2 }, // 吞噬星空（老条目；开播日是周日，实际周二更）
   "424557": { episodes: 249 },             // 吞噬星空 宇宙篇
-  "244224": { episodes: 288 },             // 完美世界（老条目）
-  "700676": { episodes: 288 },             // 完美世界 第七季
+  "244224": { episodes: 288, resume: "2026-12-31" }, // 完美世界（老条目；官方停更 13 周，9/25 第 288 集后停更，12/31 恢复）
+  "700676": { episodes: 288, resume: "2026-12-31" }, // 完美世界 第七季（第 3 集 12/31 恢复）
   "403607": { episodes: 102, weekday: 5 }, // 沧元图（老条目；开播日是周四，实际周五更）
   "575244": { episodes: 102 },             // 沧元图 第三季
   "345768": { episodes: 188 },             // 遮天（老条目）
   "637591": { episodes: 188 },             // 遮天 第四季
   "456159": {},                             // 牧神记（老条目；AGE 未收录，只改状态不写集数）
   "712000": {},                             // 牧神记5
-  "458926": {},                             // 光阴之外（老条目；AGE 未收录，只改状态不写集数）
-  "646611": {},                             // 光阴之外 第二季
-  "708411": { episodes: 708 },             // 武神主宰 姬州篇
+  "646611": {},                             // 光阴之外 第二季（52 集年番，更新中）
+  "708411": { episodes: 695 },             // 武神主宰 姬州篇（WeTV 实测 695；AGE 列表 708 含未播/特辑，高估，改 695）
 };
+// 注意：光阴之外 第一季（458926）已于 2026-06-13 收官（全 26 集），已从这张表拿掉，不要加回。
 function updateInfoFor(item) {
   if (!item) return null;
   let air = null;
@@ -778,7 +778,16 @@ function updateInfoFor(item) {
       todayFlag = dd === 0;
     }
     const eps = sa.episodes != null ? sa.episodes : null;
-    return { total: null, airDate: first, weekday: w, next: nx, isToday: todayFlag, aired: eps, finished: false, airedVerified: eps != null, stillAiring: true };
+    // 官方停更期（如完美世界 13 周停更）：resume 日期在未来时，下次更新就是恢复日，
+    // 不显示本周的放送星期，避免停更期间还写“本周五更新”误导；过期后自动回到正常周更逻辑。
+    let resuming = false;
+    if (sa.resume) {
+      const r = new Date(sa.resume + "T00:00:00");
+      if (!isNaN(r) && r > today) {
+        nx = r; w = r.getDay(); todayFlag = false; resuming = true;
+      }
+    }
+    return { total: null, airDate: first, weekday: w, next: nx, isToday: todayFlag, aired: eps, finished: false, airedVerified: eps != null, stillAiring: true, resuming };
   }
   let aired = null, finished = false;
   if (item.airedCount != null) {
@@ -848,7 +857,8 @@ function updateLineFor(item, short) {
     return u.total ? "已完结 · 共" + u.total + "集" : "已完结";
   }
   let head;
-  if (u.isToday) head = "今天" + wdStr + "更新";
+  if (u.resuming) head = dateStr + " " + wdStr + "恢复更新";
+  else if (u.isToday) head = "今天" + wdStr + "更新";
   else head = dateStr + " " + wdStr + "更新";
   if (short) return head;
   const tail = [];
