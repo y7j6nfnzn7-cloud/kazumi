@@ -718,6 +718,29 @@ function parseInfoEps(info) {
   const m = /^\s*(\d+)\s*[话話集]/.exec(info || "");
   return m ? +m[1] : null;
 }
+// ====== 仍在更新的年番/长番（Bangumi 总集数过期，不可信） ======
+// Bangumi 只记了首批集数（如吞噬星空只记 26 集），实际片源已播到 200+ 集
+// 还在更新；按 Bangumi 总集数算会误标“已完结”。这张表以片源实测为准
+// （2026-11-10 AGE 实测 249/288/102/188/708 + Bangumi 详情页下次更新日核对）：
+//   episodes：片源实测已播总集数（省略 = 只改状态、不显示集数）；
+//   weekday：本周更新星期（JS getDay 0=周日..6=周六；省略 = 用开播日推导）。
+// 键是站里实际显示的那条 Bangumi ID（老条目和新季条目都要列）。
+// 年番完结 / 新季开播 / 换星期时记得更新这张表；不确定的番不要往里加。
+const STILL_AIRING = {
+  "244239": { episodes: 249, weekday: 2 }, // 吞噬星空（老条目；开播日是周日，实际周二更）
+  "424557": { episodes: 249 },             // 吞噬星空 宇宙篇
+  "244224": { episodes: 288 },             // 完美世界（老条目）
+  "700676": { episodes: 288 },             // 完美世界 第七季
+  "403607": { episodes: 102, weekday: 5 }, // 沧元图（老条目；开播日是周四，实际周五更）
+  "575244": { episodes: 102 },             // 沧元图 第三季
+  "345768": { episodes: 188 },             // 遮天（老条目）
+  "637591": { episodes: 188 },             // 遮天 第四季
+  "456159": {},                             // 牧神记（老条目；AGE 未收录，只改状态不写集数）
+  "712000": {},                             // 牧神记5
+  "458926": {},                             // 光阴之外（老条目；AGE 未收录，只改状态不写集数）
+  "646611": {},                             // 光阴之外 第二季
+  "708411": { episodes: 708 },             // 武神主宰 姬州篇
+};
 function updateInfoFor(item) {
   if (!item) return null;
   let air = null;
@@ -740,6 +763,23 @@ function updateInfoFor(item) {
   next.setDate(today.getDate() + delta);
   // 未开播：下次更新就是开播日本身，不是这周的同一星期
   if (first > today) next.setTime(first.getTime());
+  // 仍在更新的年番/长番（见 STILL_AIRING）：Bangumi 总集数只记了首批，
+  // 按它算会误标“已完结”。以片源实测集数为准，永不判完结；总集数不写
+  // （年番总数还在涨，写“共N集”会误导），只写“已播约N集”。
+  // 未开播的不走这支（first > today 时按正常待播逻辑走）。
+  if (first <= today && item.id != null && STILL_AIRING[String(item.id)]) {
+    const sa = STILL_AIRING[String(item.id)];
+    let w = wd, nx = next, todayFlag = delta === 0;
+    if (sa.weekday != null) {
+      w = sa.weekday;
+      nx = new Date(today);
+      const dd = (w - today.getDay() + 7) % 7;
+      nx.setDate(today.getDate() + dd);
+      todayFlag = dd === 0;
+    }
+    const eps = sa.episodes != null ? sa.episodes : null;
+    return { total: null, airDate: first, weekday: w, next: nx, isToday: todayFlag, aired: eps, finished: false, airedVerified: eps != null, stillAiring: true };
+  }
   let aired = null, finished = false;
   if (item.airedCount != null) {
     // 实际已播集数（从分集接口数出来的）：跟真实更新走，不按时间推算。
@@ -799,8 +839,10 @@ function updateLineFor(item, short) {
   // 已完结先于一切兜底：updateInfoFor 已算出的 finished，以及总集数未知、
   // 未回填、开播超过 1 年的老番（周更番 1 年早已播完；仍在更新的长番靠
   // 回填的 airedCount 走下面的更新行，不会误判——回填到就不再走这支）。
+  // STILL_AIRING 的番永不走这支（u.stillAiring）：它们总集数是故意不写的，
+  // 不然这支兜底会把“总集数未知 + 开播超 1 年”当成已完结。
   // “YYYY年M月”兜底已删除：任何卡片不再显示裸年月。
-  const isFinished = u.finished || (!u.total && item.airedCount == null && ageDays > 365);
+  const isFinished = !u.stillAiring && (u.finished || (!u.total && item.airedCount == null && ageDays > 365));
   if (isFinished) {
     if (short) return "已完结";
     return u.total ? "已完结 · 共" + u.total + "集" : "已完结";
@@ -811,8 +853,10 @@ function updateLineFor(item, short) {
   if (short) return head;
   const tail = [];
   if (u.total) tail.push("共" + u.total + "集");
-  // 总集数未知时不推测已播集数（否则老番会算出几百集）；有总集数才显示
-  if (u.total && !u.finished && u.aired > 0) tail.push("已播约" + u.aired + "集");
+  // 总集数未知时不推测已播集数（否则老番会算出几百集）；有总集数才显示。
+  // 例外：STILL_AIRING 的番集数是片源实测的（airedVerified），总集数虽
+  // 未写、已播数可信，也显示“已播约N集”。
+  if (!u.finished && u.aired > 0 && (u.total || u.airedVerified)) tail.push("已播约" + u.aired + "集");
   return tail.length ? head + " · " + tail.join(" · ") : head;
 }
 // 未开播判断（共用）：开播日在今天之后。日期每次都从接口现取，站内不缓存日期，
