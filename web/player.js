@@ -1087,6 +1087,8 @@ function bindTapSeek(video, wrap) {
   bindTapTarget(zone, "middle");
   bindTapTarget(edgeL, "left");
   bindTapTarget(edgeR, "right");
+  // 横屏长按还会弹出系统菜单（复制等）：tap-zone 只盖视频区，wrap 整层再禁一次兜底。
+  wrap.addEventListener("contextmenu", (ev) => { ev.preventDefault(); });
 }
 
 // ====== 一键横屏 ======
