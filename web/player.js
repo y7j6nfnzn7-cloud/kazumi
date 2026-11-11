@@ -1278,6 +1278,7 @@ async function renderPlayer(params) {
     switchTried.add(failedPlugin);
     const seriesName = (title || "").split(" · ").slice(0, -1).join(" · ") || title || "";
     let hadOthers = false;
+    const switchLog = [];
     try {
       const plugins = await fetchJson("/api/plugins");
       let latMap = {};
@@ -1296,13 +1297,29 @@ async function renderPlayer(params) {
         if (switchTried.has(p.name)) continue;
         hadOthers = true;
         let r = null;
-        try { r = await pluginSearchBest(p.name, [seriesName]); } catch (_) { continue; }
+        try { r = await pluginSearchBest(p.name, [seriesName]); } catch (_) { switchLog.push(p.name + " 搜不到"); continue; }
         const best = r && r.best;
-        if (!best || best.score < 20) continue;
+        if (!best || best.score < 20) { switchLog.push(p.name + " 搜不到"); continue; }
         let info = null;
-        try { info = await loadRoadsAndHistory(p.name, best.item.src, bid); } catch (_) { continue; }
+        for (let att = 0; att < 3 && !info; att++) {
+          try { info = await loadRoadsAndHistory(p.name, best.item.src, bid); }
+          catch (_) { if (att < 2) await new Promise((res) => setTimeout(res, 800)); }
+        }
+        if (!info) { switchLog.push(p.name + " 取集数失败"); continue; }
         const eps = ((info.roads || [])[0] || {}).episodes || [];
-        if (!eps[epNum - 1]) continue;
+        if (!eps[epNum - 1]) { switchLog.push(p.name + " 没这集"); continue; }
+        // 跳页前先直接解析验证：能解析才跳，不行就地换下一个，不白跳一次整页。
+        // （吞噬第 1 集教训：AGE 解析 20 秒超时，盲跳到 MXdm 又超时，光速/7sefun 明明 1 秒能解析却没走到。）
+        let okRes = null;
+        try {
+          const rc2 = new AbortController();
+          const rt2 = setTimeout(() => rc2.abort(), 10000);
+          try {
+            const rr = await fetch("/api/resolve?plugin=" + encodeURIComponent(p.name) + "&episodeUrl=" + encodeURIComponent(eps[epNum - 1].src), { signal: rc2.signal });
+            if (rr.ok) okRes = await rr.json();
+          } finally { clearTimeout(rt2); }
+        } catch (_) {}
+        if (!okRes) { switchLog.push(p.name + " 解析失败"); switchTried.add(p.name); markPluginParseFailed(p.name); continue; }
         localStorage.setItem("lastPlugin", p.name);
         toast("已自动换源，正在解析…");
         go("/play", {
@@ -1311,10 +1328,10 @@ async function renderPlayer(params) {
           episode: String(epNum), road: "0", src: best.item.src,
           bid: bid || undefined, fb: [...switchTried, p.name].join(","),
         });
-        return { switched: true, hadOthers };
+        return { switched: true, hadOthers, log: switchLog };
       }
     } catch (_) { /* 拿规则列表失败就直接报错 */ }
-    return { switched: false, hadOthers };
+    return { switched: false, hadOthers, log: switchLog };
   }
   try {
     // 解析 20 秒超时：一次 504 不能拖 35 秒；超时按解析失败走自动换源。
@@ -1340,7 +1357,7 @@ async function renderPlayer(params) {
     const sw = await autoSwitchSource(plugin);
     if (sw.switched) return;
     status.remove();
-    page.append(errorState({ title: "解析失败", message: sw.hadOthers ? "这个源播不出来，换了其他源也播不出来：" + e.message : e.message, onRetry: () => renderPlayer(params) }));
+    page.append(errorState({ title: "解析失败", message: sw.hadOthers ? "这个源播不出来，换了其他源也播不出来：" + (sw.log && sw.log.length ? sw.log.join("；") + "。" : "") + e.message : e.message, onRetry: () => renderPlayer(params) }));
     return;
   }
   status.remove();
