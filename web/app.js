@@ -3483,6 +3483,71 @@ function openCharacterSheet(ch) {
   });
 }
 
+// 选源标题匹配（2026-11-11 修“点开始观看播错条目”）：
+// 各源搜标题常返回一堆同名不同条目（剧场版、第二季、总集篇排在正片前面），
+// 之前直接取 items[0]，结果鬼灭 S1 播成 155 分钟剧场版、芙莉莲 S1 播成
+// 第二季（10 集）、咒术 S1 播成第三季。改成按标题匹配度挑条目：
+// 完全同名 > 同名+无害后缀 > 同名+季/剧场版等后缀（很可能是错季/错体裁）> 不含标题。
+// 标题本身带季/剧场版标记时（如“斗破苍穹 年番4”“完美世界 第七季”），
+// 同名条目仍按完全同名算，不扣分。
+function normalizeTitle(s) {
+  return String(s || "").toLowerCase().replace(/[\s：:・·、，,。.!！?？\-—_()（）\[\]【】'"“”‘’\/／]/g, "");
+}
+// 季/体裁标记：条目名比标题多出这些，基本就是另一部（另一季/剧场版/总集篇）。
+const TITLE_EXTRA_MARKERS = ["剧场版", "电影版", "电影", "特别编集版", "总集篇", "第2季", "第3季", "第4季", "第5季", "第6季", "第7季", "第8季", "第9季", "第二季", "第三季", "第四季", "第五季", "第六季", "第七季", "第八季", "第九季", "完结季", "最终季", "年番", "死灭回游", "怀玉", "玉折"];
+function titleMatchScore(itemName, title) {
+  const n = normalizeTitle(itemName), t = normalizeTitle(title);
+  if (!t) return -100;
+  if (n === t) return 100;
+  if (n.indexOf(t) === 0) {
+    const extra = n.slice(t.length);
+    for (const m of TITLE_EXTRA_MARKERS) {
+      if (extra.indexOf(normalizeTitle(m)) >= 0) return -50;
+    }
+    return 40;
+  }
+  // 源站名比标题短、是标题的前缀（如源站只有“斗破苍穹年番”，标题是“斗破苍穹 年番4”）：
+  // 算弱匹配，宁可播同系列正片也不弹手动表；短于 4 字的前缀不算（太容易误撞）。
+  if (t.indexOf(n) === 0 && n.length >= 4) return 30;
+  if (n.indexOf(t) >= 0) return 20;
+  return -100;
+}
+function pickBestSearchItem(items, titles) {
+  // titles：[nameCn, name]，取两者中最好的匹配分；同分取原顺序靠前的。
+  let best = null;
+  for (let i = 0; i < (items || []).length; i++) {
+    const it = items[i];
+    let score = -100;
+    for (const t of titles) score = Math.max(score, titleMatchScore(it && it.name, t));
+    if (!best || score > best.score) best = { item: it, score: score, index: i };
+  }
+  return best;
+}
+function stripSeasonSuffix(title) {
+  // 去掉标题末尾的季标记：源站搜索对“沧元图 第三季”这种词基本搜不到（4 个源
+  // 0 条、光速返回 20 条无关的第三季），用裸标题“沧元图”才能搜到正片
+  // （源站多为连续条目，季内容在里面）。
+  const t = String(title || "").trim();
+  const base = t.replace(/(?:\s*第[一二三四五六七八九\d]+季|\s*第[一二三四五六七八九\d]+期|\s*年番\d*|\s*S\d+|\s*Season\s*\d+)$/i, "").trim();
+  return base && base !== t ? base : "";
+}
+async function pluginSearchBest(pluginName, titles) {
+  // 先用完整标题搜；搜不到可用的，就去掉季后缀用裸标题再搜一次。
+  // 返回 { items, best }：best 是按标题匹配度挑出的最优条目（可能分很低或 null）。
+  const items = await pluginSearchSingle(pluginName, titles[0]);
+  let best = pickBestSearchItem(items, titles);
+  if (best && best.score >= 20) return { items, best };
+  const base = stripSeasonSuffix(titles[0]);
+  if (base) {
+    try {
+      const items2 = await pluginSearchSingle(pluginName, base);
+      const best2 = pickBestSearchItem(items2, titles.concat([base]));
+      if (best2 && best2.score >= 20) return { items: items2, best: best2 };
+    } catch (_) {}
+  }
+  return { items, best };
+}
+
 // ============================================================
 // 自动识别最优源（2026-11-09 用户定：“你要加的是自动识别最优的源，
 // 显示延迟多少用这个”）：点“开始观看”不再弹来源表，并行测全部已装
@@ -3503,13 +3568,17 @@ async function autoPlayBangumi(bangumi) {
   }
   if (!plugins.length) { openSourcePicker(bangumi); return; }
   toast("正在测哪个源最快…");
+  const titles = [];
+  if (bangumi.nameCn) titles.push(bangumi.nameCn);
+  if (bangumi.name && bangumi.name !== bangumi.nameCn) titles.push(bangumi.name);
+  if (!titles.length) titles.push(title);
   const results = await Promise.all(plugins.map(async (p) => {
     const s = performance.now();
     try {
-      const items = await pluginSearchSingle(p.name, title);
-      return { name: p.name, ms: Math.round(performance.now() - s), items };
+      const r = await pluginSearchBest(p.name, titles);
+      return { name: p.name, ms: Math.round(performance.now() - s), items: r.items, best: r.best };
     } catch (e) {
-      return { name: p.name, ms: Math.round(performance.now() - s), items: [], error: e.code || "error" };
+      return { name: p.name, ms: Math.round(performance.now() - s), items: [], best: null, error: e.code || "error" };
     }
   }));
   try {
@@ -3517,17 +3586,24 @@ async function autoPlayBangumi(bangumi) {
     for (const r of results) lat[r.name] = r.ms;
     localStorage.setItem("pluginLatency", JSON.stringify(lat));
   } catch (_) {}
-  // 排序：干净优先（clean-sources.json 有记录时）→ 延迟从低到高。
+  // 2026-11-11：先按标题匹配度挑条目，再按延迟排。之前直接取 items[0]，
+  // 搜“鬼灭之刃”首条是剧场版、搜“葬送的芙莉莲”首条是第二季，点开始观看
+  // 就播错。匹配分：完全同名 100 > 同名+无害后缀 40 > 含标题 20；
+  // 同名+季/剧场版后缀 -50（错季/错体裁）；不含标题 -100，直接排除该源
+  // （全排除就打开手动选源表，不播错条目）。
+  const withBest = results.map((r) => ({ name: r.name, ms: r.ms, error: r.error, best: r.best && r.best.score >= 20 ? r.best : null })).filter((r) => r.best);
+  // 排序：标题匹配度优先（同名正片哪怕慢一点，也胜过更快但错季/错体裁的条目）→
+  // 干净优先（clean-sources.json 有记录时）→ 延迟从低到高。
   // 探针只测“搜得快”，不测“能不能播”：24 小时内解析失败过的源
   // （含本次会话刚失败的，SESSION_PARSE_FAILED）不再首选，全部
   // 失败过才按延迟从低到高试，不卡死。
   let clean = { clean: {}, dirty: [] };
   try { clean = await loadCleanSources(); } catch (_) {}
-  const ok = orderPluginsCleanFirst(results.filter((r) => r.items.length), clean, title, String(bangumi.id))
+  const ok = orderPluginsCleanFirst(withBest, clean, title, String(bangumi.id))
     .sort((a, b) => {
       const ca = (clean.clean && clean.clean[a.name]) ? 0 : 1;
       const cb = (clean.clean && clean.clean[b.name]) ? 0 : 1;
-      return (ca - cb) || (a.ms - b.ms);
+      return (b.best.score - a.best.score) || (ca - cb) || (a.ms - b.ms);
     });
   let usable = ok;
   const fresh = ok.filter((r) => !pluginFailedRecently(r.name));
@@ -3536,7 +3612,7 @@ async function autoPlayBangumi(bangumi) {
     const best = usable[0];
     localStorage.setItem("lastPlugin", best.name);
     toast("已选最快的源：" + best.name + "（延迟 " + (best.ms / 1000).toFixed(1) + " 秒）");
-    startPlayback({ plugin: best.name, src: best.items[0].src, title, bid: String(bangumi.id) });
+    startPlayback({ plugin: best.name, src: best.best.item.src, title, bid: String(bangumi.id) });
     return;
   }
   openSourcePicker(bangumi);
@@ -3665,9 +3741,9 @@ async function openSourcePicker(bangumi) {
       renderGroup(name);
       updateDesc();
       try {
-        const items = await pluginSearchSingle(name, kw);
-        s.status = items.length ? "success" : "noResult";
-        s.items = items;
+        const r = await pluginSearchBest(name, [kw]);
+        s.status = r.items.length ? "success" : "noResult";
+        s.items = r.items;
       } catch (e) {
         s.status = e.code === "captcha" ? "captcha" : "error";
         s.error = e.message;
@@ -4054,10 +4130,11 @@ async function renderEpisodes(params) {
     const eps0 = info && ((info.roads[0] || {}).episodes || []).length;
     if (info && (!info.roads.length || !eps0) && title) {
       try {
-        const items = await pluginSearchSingle(plugin, title);
-        if (items.length && items[0].src !== src) {
+        const r = await pluginSearchBest(plugin, [title]);
+        const best = r.best;
+        if (best && best.score >= 20 && best.item.src !== src) {
           toast("该链接的选集为空，已按标题找到同一源的条目");
-          info = await loadRoadsAndHistory(plugin, items[0].src, bid);
+          info = await loadRoadsAndHistory(plugin, best.item.src, bid);
         }
       } catch (_) {}
     }
