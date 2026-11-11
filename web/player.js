@@ -715,6 +715,30 @@ function disposeActiveVideo() {
   } catch (_) {}
 }
 
+// ====== 锁按钮跑位自愈 ======
+// 2026-11-11 桌面复测：一念永恒选集区倒序/正序/跳操作后，锁一度跑到页面
+// 顶边、被视口上沿裁掉一半；点它切换锁定后才回视频右上角。静态看锁一直
+// 在 playerWrap 里、.player-wrap 也是 relative，触发条件没复现出来；
+// 加一道自愈：滚动停下 / 退出横屏时，若锁的定位基准（offsetParent）不是
+// 视频容器，就把它挪回容器里并强制重排，把陈旧的绘制位置刷掉。平时不做
+// 事，只在异常时动手；监听只绑一次，不随切集累积。
+let activePlayerWrap = null;
+function reanchorLock(wrap) {
+  if (!wrap || !wrap.isConnected) { if (wrap === activePlayerWrap) activePlayerWrap = null; return; }
+  const lock = wrap.querySelector(".ui-lock-btn");
+  if (!lock) return;
+  if (lock.parentElement !== wrap || lock.offsetParent !== wrap) wrap.append(lock);
+  void lock.offsetWidth; // 强制重排，刷掉陈旧的绘制位置
+}
+if (typeof window !== "undefined" && !window.__lockReanchorBound) {
+  window.__lockReanchorBound = true;
+  let lockReanchorTimer = null;
+  window.addEventListener("scroll", () => {
+    clearTimeout(lockReanchorTimer);
+    lockReanchorTimer = setTimeout(() => { if (activePlayerWrap) reanchorLock(activePlayerWrap); }, 150);
+  }, { passive: true, capture: true });
+}
+
 // ====== 键盘快捷键（桌面浏览器） ======
 // Space 播放/暂停 · ←/→ ±5s · ↑/↓ 音量 · F 全屏 · M 静音 · P 画中画
 let _playerKeyHandler = null;
@@ -866,7 +890,13 @@ function bindTapSeek(video, wrap) {
   const armAutoHide = () => {
     clearTimeout(hideTimer); hideTimer = null;
     if (!main || video.paused || isLocked() || main.classList.contains("controls-hidden")) return;
-    hideTimer = setTimeout(() => { if (!video.paused && !isLocked()) hideControls(); }, AUTO_HIDE_MS);
+    hideTimer = setTimeout(() => {
+      // 菜单开着（倍速下拉 / 更多菜单）：不藏，1.5 秒后再看——原生 select
+      // 时代就是这个定时器在用户挑倍速时把控制条藏了、连下拉一起杀掉，
+      // 点选落到进度条上误跳播（2026-11-11 桌面复测：点 9 次只弹出 2 次）。
+      if (main.classList.contains("menu-open")) { armAutoHide(); return; }
+      if (!video.paused && !isLocked()) hideControls();
+    }, AUTO_HIDE_MS);
   };
   const showControls = () => {
     if (!main || isLocked()) return;
@@ -874,7 +904,8 @@ function bindTapSeek(video, wrap) {
     armAutoHide();
   };
   const hideControls = () => {
-    if (!main) return;
+    // 菜单开着时也不藏：单点视频会走到这儿，藏了就把菜单一起盖掉。
+    if (!main || main.classList.contains("menu-open")) return;
     main.classList.add("controls-hidden");
     clearTimeout(hideTimer); hideTimer = null;
   };
@@ -1208,6 +1239,9 @@ function exitRotated(wrap, btn) {
   const exit = wrap.querySelector(".rotate-exit");
   if (exit) exit.style.display = "none";
   setLandscapeLabel(btn, "全屏");
+  // 退出横屏会动 .player-wrap 的定位上下文（fixed ↔ relative），顺手把锁
+  // 按钮的位置刷一次，别让它留在旧的绘制位置上。
+  reanchorLock(wrap);
 }
 
 // ============================================================
@@ -1348,21 +1382,71 @@ async function renderPlayer(params) {
   // 的状态跟到下一集/下一次打开，点画面也没反应，所以一进播放页就清掉
   // 并写回；锁只在本集内有效。
   if (prefs.uiLock) { prefs.uiLock = false; savePrefs({ uiLock: false }); }
-  const rateSelect = el("select", { class: "btn btn-tonal", "aria-label": "倍速" });
-  const initialRate = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0].includes(prefs.rate) ? prefs.rate : 1.0;
-  for (const r of [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]) {
-    const opt = el("option", { value: String(r) }, r + "x");
-    if (r === initialRate) opt.setAttribute("selected", "");
-    rateSelect.append(opt);
-  }
-  const applyRate = () => {
-    const r = parseFloat(rateSelect.value);
-    if (!Number.isNaN(r)) { video.playbackRate = r; savePrefs({ rate: r }); }
-    // 选完把焦点还给页面：SELECT 拿着焦点时空格/方向键会被它吞掉，
-    // 键盘快捷键（bindPlayerKeys 遇到 INPUT/SELECT 直接返回）就失灵了。
-    try { rateSelect.blur(); } catch (_) {}
+  // 倍速：原生 <select> 在桌面横屏下极不稳（2026-11-11 桌面复测：点 9 次
+  // 只弹出 2 次、2x 三次都选不上——控制条 1.5 秒自动隐藏会把 select 设成
+  // visibility:hidden，Chrome 随即关掉原生下拉；菜单开着时鼠标在原生弹窗
+  // 上不产生页面 pointermove，定时器一到就把弹窗杀掉，点选落到进度条上
+  // 误跳播）。改成自定义下拉：按钮 + 菜单 div，菜单开着时 main 加
+  // .menu-open，自动隐藏看到就跳过（见 bindTapSeek 的 armAutoHide）；
+  // 选完 / 点外面 / 按 Esc 关菜单，关完把焦点还给页面（空格恢复播放/暂停）。
+  const RATES = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+  const initialRate = RATES.includes(prefs.rate) ? prefs.rate : 1.0;
+  const rateBtn = button(initialRate + "x", { variant: "tonal" });
+  rateBtn.setAttribute("aria-label", "倍速");
+  rateBtn.setAttribute("aria-haspopup", "menu");
+  rateBtn.setAttribute("aria-expanded", "false");
+  const rateMenu = el("div", { class: "player-rate-menu", role: "menu", "aria-label": "倍速" });
+  const rateOptions = {};
+  const syncRateOptions = (r) => {
+    for (const [k, o] of Object.entries(rateOptions)) {
+      const on = +k === r;
+      o.classList.toggle("is-active", on);
+      o.setAttribute("aria-checked", String(on));
+    }
   };
-  rateSelect.addEventListener("change", applyRate);
+  const setRate = (r) => {
+    video.playbackRate = r;
+    savePrefs({ rate: r });
+    const l = rateBtn.querySelector(".label");
+    if (l) l.textContent = r + "x";
+    syncRateOptions(r);
+  };
+  for (const r of RATES) {
+    const opt = el("button", { class: "rate-opt", type: "button", role: "menuitemradio", "aria-checked": String(r === initialRate) }, r + "x");
+    if (r === initialRate) opt.classList.add("is-active");
+    opt.addEventListener("click", (ev) => { ev.stopPropagation(); setRate(r); closeRateMenu(); });
+    rateMenu.append(opt);
+    rateOptions[r] = opt;
+  }
+  const rateWrap = el("div", { class: "rate-wrap" }, rateBtn, rateMenu);
+  // 两个菜单（倍速下拉 / 更多菜单）只要有一个开着，自动隐藏就暂停。
+  const syncMenuOpenClass = () => {
+    main.classList.toggle("menu-open", rateMenu.classList.contains("is-open") || moreMenu.classList.contains("is-open"));
+  };
+  const onRateMenuOutside = (ev) => { if (!rateWrap.contains(ev.target)) closeRateMenu(); };
+  const onRateMenuKey = (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); closeRateMenu(); } };
+  const openRateMenu = () => {
+    rateMenu.classList.add("is-open");
+    rateBtn.setAttribute("aria-expanded", "true");
+    syncMenuOpenClass();
+    document.addEventListener("pointerdown", onRateMenuOutside, true);
+    document.addEventListener("keydown", onRateMenuKey, true);
+  };
+  const closeRateMenu = () => {
+    if (!rateMenu.classList.contains("is-open")) return;
+    rateMenu.classList.remove("is-open");
+    rateBtn.setAttribute("aria-expanded", "false");
+    syncMenuOpenClass();
+    document.removeEventListener("pointerdown", onRateMenuOutside, true);
+    document.removeEventListener("keydown", onRateMenuKey, true);
+    // 选完把焦点还给页面：按钮拿着焦点时空格会再触发它，键盘快捷键失灵。
+    try { if (document.activeElement) document.activeElement.blur(); } catch (_) {}
+  };
+  rateBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (rateMenu.classList.contains("is-open")) closeRateMenu();
+    else openRateMenu();
+  });
   if (initialRate !== 1.0) video.addEventListener("loadedmetadata", () => { video.playbackRate = initialRate; }, { once: true });
 
   const fitSelect = el("select", { class: "btn btn-tonal", "aria-label": "画面比例" });
@@ -1399,6 +1483,7 @@ async function renderPlayer(params) {
   const moreBtn = button("更多", { variant: "text", onclick: (ev) => {
     if (ev) ev.stopPropagation();
     moreMenu.classList.toggle("is-open");
+    syncMenuOpenClass(); // 更多菜单开着时自动隐藏也暂停（和倍速下拉同一机制）
   } });
   const reload = button("重新解析", { variant: "text", icon: "refresh", onclick: () => renderPlayer(params) });
   const landscapeBtn = button("全屏", { variant: "text", onclick: () => toggleLandscape(video, playerWrap, landscapeBtn) });
@@ -1439,7 +1524,7 @@ async function renderPlayer(params) {
   // 主排只留 6 个固定项（2026-11-10 按腾讯思路重排）：播放/暂停、上一集、
   // 下一集、倍速、跳过片头开关、全屏，flex 均分一排全部可见、不横向滑动；
   // “更多”（画质/画面比例/重新解析/画中画）挪到下面第二行，不占主排。
-  const controls = el("div", { class: "player-controls" }, playPauseBtn, prevBtn, nextBtn, rateSelect, skipToggleBtn, landscapeBtn);
+  const controls = el("div", { class: "player-controls" }, playPauseBtn, prevBtn, nextBtn, rateWrap, skipToggleBtn, landscapeBtn);
   const controlsSecondary = el("div", { class: "player-controls-secondary" }, moreBtn);
   // ====== 进度条 + 当前/总时长（2026-11-09 线上复测回归） ======
   // controls:false 后原生进度条没了，自定义控制条之前也漏了进度条——
@@ -1608,8 +1693,9 @@ async function renderPlayer(params) {
         sourceTile.querySelector(".tile-desc").textContent = (pick.animeTitle || "未命名") + " · " + (pick.episodeTitle || "");
         toast("已切换弹幕源，共 " + danmaku.count + " 条");
       } catch (e) {
-        danmakuDesc.textContent = "弹幕加载失败";
-        toast("弹幕加载失败：" + e.message);
+        // 上游弹幕源常年 403（2026-11-11：/api/danmaku 16 次全 502），修不了：
+        // 不留报错面板、不弹 toast，只显示“暂无弹幕”，播放不受影响。
+        danmakuDesc.textContent = "暂无弹幕";
       }
     } });
   } });
@@ -1665,7 +1751,8 @@ async function renderPlayer(params) {
       danmakuDesc.textContent = "共 " + danmaku.count + " 条";
       if (!danmaku.count) sourceTile.querySelector(".tile-desc").textContent = "自动匹配未找到弹幕，可手动选择";
     } catch (e) {
-      danmakuDesc.textContent = "弹幕加载失败";
+      // 同上：上游 403 是常态，失败就显示“暂无弹幕”，不留报错面板。
+      danmakuDesc.textContent = "暂无弹幕";
     }
   } else {
     danmakuDesc.textContent = "需从番剧详情页打开才能加载弹幕";
@@ -1836,6 +1923,9 @@ async function renderPlayer(params) {
   lockIcon.addEventListener("click", (ev) => { ev.stopPropagation(); toggleUiLock(); });
   lockIcon.addEventListener("touchend", (ev) => { ev.stopPropagation(); ev.preventDefault(); toggleUiLock(); }, { passive: false });
   playerWrap.append(lockIcon);
+  // 锁跑位自愈的锚点：当前播放页的视频容器（见文件上方 reanchorLock）。
+  activePlayerWrap = playerWrap;
+  reanchorLock(playerWrap);
   // 进播放页时已默认解锁（见上方的锁重置），这里不再按旧值加锁。
   // 原生进度条拖动的学习：programmaticSeek 为 true 时是 doSeek/自动跳/
   // 按钮 seek，不记；否则是从 <60 秒出发、向前 >=10 秒、落点 10–180 秒的手动跳。

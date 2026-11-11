@@ -1172,6 +1172,16 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
 .player-controls-wrap { position: relative; }
 .player-more-menu { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; padding: 10px; border-radius: 12px; background: rgba(255,255,255,0.06); }
 .player-more-menu.is-open { display: flex; }
+/* 倍速自定义下拉（2026-11-11：原生 select 在桌面横屏下点 9 次只弹出 2 次，
+   控制条自动隐藏会杀掉原生下拉弹窗，改成按钮 + 菜单 div；菜单从按钮上方
+   弹出，盖住画面底部，不挤控制条；.rate-wrap 占原来 select 的 1.3 份宽）。 */
+.player-controls .rate-wrap { flex: 1.3 1 0; position: relative; display: flex; min-width: 0; min-height: 48px; }
+.rate-wrap > .btn { flex: 1 1 0; min-width: 0; }
+.player-rate-menu { display: none; position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 11; min-width: 96px; padding: 6px; border-radius: 12px; background: rgba(0,0,0,0.85); box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+.player-rate-menu.is-open { display: block; }
+.player-rate-menu .rate-opt { display: block; width: 100%; min-height: 40px; padding: 8px 12px; border: none; border-radius: 8px; background: transparent; color: #fff; font-size: 14px; text-align: left; cursor: pointer; }
+.player-rate-menu .rate-opt:hover { background: rgba(255,255,255,0.12); }
+.player-rate-menu .rate-opt.is-active { background: var(--primary-container); color: var(--on-primary-container); font-weight: 700; }
 .player-more-menu > * { flex: 0 0 auto; min-height: 48px; }
 /* 主排：六个按钮 flex 均分（跳过片头占 1.5 份、倍速占 1.3 份），文案按钮
    不用图标，393px 下刚好一排；再窄就省略号兜底，不藏按钮、不横向滑动。

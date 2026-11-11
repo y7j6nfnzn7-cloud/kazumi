@@ -744,6 +744,21 @@ const STILL_AIRING = {
   "286354": { episodes: 697 },             // 武神主宰（老条目；Bangumi 只记首批 272 话，实际已播约 697 集，周日、周二更；姬州篇 708411 同系列）
 };
 // 注意：光阴之外 第一季（458926）已于 2026-06-13 收官（全 26 集），已从这张表拿掉，不要加回。
+// 显示用总集数（只改显示数字，不参与完结判定）：Bangumi info 只记首批或
+// 首季集数——雾山五行 info 写“3话”（实际全 7 话，2023-08-16 已完结）、
+// 妖神记 info 写“40话”（实际全 488 集，S10 2026-10 收官）；分集接口也
+// 只列了首批（雾山 3 集、妖神记 48 条含特辑、正片 40 集），拿实测总数去
+// 算完结会把“已完结”翻成“更新中”，所以完结判定仍用 Bangumi 总集数 +
+// 分集数，这里只纠正详情页/卡片上显示的“共N集”。
+const TOTAL_EPISODES = {
+  "305515": 7,    // 雾山五行：全 7 话
+  "214790": 488,  // 妖神记：全 488 集
+};
+// 详情/卡片显示的总集数：有实测纠正就用纠正值，否则用 Bangumi info 解析值。
+function displayTotal(item, fallback) {
+  const t = item && item.id != null ? TOTAL_EPISODES[String(item.id)] : null;
+  return t != null ? t : fallback;
+}
 function updateInfoFor(item) {
   if (!item) return null;
   let air = null;
@@ -831,6 +846,8 @@ function updateLineFor(item, short) {
   // 没有有效开播日（老片 Bangumi 缺日期）：
   // 不显示假日期；拉到集数就显示“共N集”，没拉到就空着、等集数回来再补。
   if (!u) return item.airedCount != null ? "共" + item.airedCount + "集" : "";
+  // 显示用总集数（见 TOTAL_EPISODES）：完结判定仍用 u.total，这里只改显示。
+  const dispTotal = displayTotal(item, u.total);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const ageDays = Math.floor((today.getTime() - u.airDate.getTime()) / 86400000);
   const dateStr = (u.next.getMonth() + 1) + "月" + u.next.getDate() + "日";
@@ -846,7 +863,7 @@ function updateLineFor(item, short) {
     const fullDate = u.airDate.getFullYear() + "年" + (u.airDate.getMonth() + 1) + "月" + u.airDate.getDate() + "日";
     const head = "待播 " + fullDate + " " + wdStr + "开播";
     if (short) return head;
-    return u.total ? head + " · 共" + u.total + "集" : head;
+    return dispTotal ? head + " · 共" + dispTotal + "集" : head;
   }
   // 已完结先于一切兜底：updateInfoFor 已算出的 finished，以及总集数未知、
   // 未回填、开播超过 1 年的老番（周更番 1 年早已播完；仍在更新的长番靠
@@ -857,7 +874,7 @@ function updateLineFor(item, short) {
   const isFinished = !u.stillAiring && (u.finished || (!u.total && item.airedCount == null && ageDays > 365));
   if (isFinished) {
     if (short) return "已完结";
-    return u.total ? "已完结 · 共" + u.total + "集" : "已完结";
+    return dispTotal ? "已完结 · 共" + dispTotal + "集" : "已完结";
   }
   let head;
   if (u.resuming) head = dateStr + " " + wdStr + "恢复更新";
@@ -865,7 +882,7 @@ function updateLineFor(item, short) {
   else head = dateStr + " " + wdStr + "更新";
   if (short) return head;
   const tail = [];
-  if (u.total) tail.push("共" + u.total + "集");
+  if (dispTotal) tail.push("共" + dispTotal + "集");
   // 总集数未知时不推测已播集数（否则老番会算出几百集）；有总集数才显示。
   // 例外：STILL_AIRING 的番集数是片源实测的（airedVerified），总集数虽
   // 未写、已播数可信，也显示“已播约N集”。
@@ -2296,7 +2313,8 @@ function buildTimelineCard(item) {
   const epMatch = /^\s*([1-9]\d*)\s*[话話集]/.exec(item.info || "");
   const tags = (item.tags || []).map((t) => (t.name || "").trim()).filter(Boolean);
   const metadata = [];
-  if (epMatch) metadata.push(epMatch[1] + " 话");
+  const dispEp = displayTotal(item, epMatch ? +epMatch[1] : null);
+  if (dispEp) metadata.push(dispEp + " 话");
   for (const t of tags) if (!metadata.includes(t)) metadata.push(t);
   let meta = metadata.slice(0, 3).join(" · ");
   if (!meta && item.name && item.name !== title) meta = item.name;
@@ -3626,7 +3644,7 @@ async function autoPlayBangumi(bangumi) {
   // 的不首选；更新中的番不验（集数本来就没出全）；全部都不够时不过滤（宁可播也别弹表）。
   try {
     const label = updateLineFor(bangumi) || "";
-    const total = parseInfoEps(bangumi.info);
+    const total = displayTotal(bangumi, parseInfoEps(bangumi.info));
     if (label.indexOf("已完结") === 0 && total) {
       const need = Math.max(2, Math.floor(total * 0.5));
       const checks = await Promise.all(usable.map(async (r) => {
@@ -3994,6 +4012,10 @@ function episodePanel(ctx) {
     const jumpBtn = button("跳", { variant: "text", small: true, onclick: () => {
       const n = parseInt(jumpInput.value, 10);
       if (!n || n < 1 || n > total) { toast("请输入 1-" + total + " 之间的集数"); return; }
+      // 点“跳”直接切集播放，走和点选集格同一条路（2026-11-11 桌面复测：
+      // 只滚动+高亮不切集，标题和 URL 都不动，看着像没反应）。已在播的那集
+      // 只定位高亮，不重复进播放页。
+      if (n - 1 !== playing) { go("/play", playEpisodeParams(ctx, eps[n - 1], n - 1, activeRoadIdx)); return; }
       rangeIdx = Math.floor((n - 1) / EP_PAGE);
       render();
       const cell = root.querySelector('.ep-cell[data-ep="' + n + '"]');
@@ -4005,6 +4027,8 @@ function episodePanel(ctx) {
         setTimeout(() => cell.classList.remove("is-jump-target"), 1800);
       }
     } });
+    // 回车也跳：和弹幕源 sheet 里的集号输入一致。
+    jumpInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") jumpBtn.click(); });
     const controlsChildren = [sortBtn, latestBtn, el("div", { class: "ep-jump" }, jumpInput, jumpBtn)];
     // 分段快捷条（2026-11-09 用户亲口定）：集数多（>50 集）时可见，每 50 集一段，
     // 点一段直接跳过去，不用往下翻；≤50 集不显示，不多余。原来那个下拉选段
