@@ -1175,6 +1175,17 @@ function bindNativeFullscreenGuard(video, wrap, btn) {
 function enterRotated(wrap, btn) {
   wrap.classList.add("is-rotated");
   document.body.classList.add("no-scroll");
+  // 横屏也要那排按钮（2026-11-10 用户定）：控制条行平时在页面流里（播放器下方），
+  // 旋转后播放器是 fixed 铺满视口，会把它盖住。进横屏时把它挪进旋转框里贴在底部
+  // （CSS .is-rotated .player-controls-wrap）；退出时挪回原位。只挪节点不重建：
+  // 事件监听和状态都在节点上，不会丢；手势只绑在 tap-zone/edge-zone 上，
+  // 控制条挪进来也不会触发点按逻辑。
+  const main = wrap.closest(".player-main");
+  const cw = main && main.querySelector(".player-controls-wrap");
+  if (cw && cw.parentElement !== wrap) {
+    cw._homeNext = cw.nextSibling; // 退出时插回原来的位置（.player-meta 之前）
+    wrap.append(cw);
+  }
   let exit = wrap.querySelector(".rotate-exit");
   if (!exit) {
     exit = el("button", { class: "rotate-exit sl", type: "button" }, "退出全屏");
@@ -1187,6 +1198,13 @@ function enterRotated(wrap, btn) {
 function exitRotated(wrap, btn) {
   wrap.classList.remove("is-rotated");
   document.body.classList.remove("no-scroll");
+  const main = wrap.closest(".player-main");
+  const cw = wrap.querySelector(".player-controls-wrap");
+  if (cw && main && cw.parentElement === wrap) {
+    if (cw._homeNext && cw._homeNext.parentElement === main) main.insertBefore(cw, cw._homeNext);
+    else main.append(cw);
+    cw._homeNext = null;
+  }
   const exit = wrap.querySelector(".rotate-exit");
   if (exit) exit.style.display = "none";
   setLandscapeLabel(btn, "全屏");
@@ -1467,7 +1485,10 @@ async function renderPlayer(params) {
   moreMenu.append(fitSelect, qualitySelect, reload);
   // 主排不再横向滑动，右侧滚动提示和 resize 复查一并删掉（2026-11-10）。
   const controlsWrap = el("div", { class: "player-controls-wrap" }, seekRow, controls, controlsSecondary);
-  main.append(controlsWrap, moreMenu);
+  // “更多”菜单是控制条的一部分（2026-11-10 横屏修法）：放进 controlsWrap 里，
+  // 横屏时跟着控制条一起挪进旋转框、从条上方弹出；竖屏渲染位置不变（仍在第二行下方）。
+  controlsWrap.append(moreMenu);
+  main.append(controlsWrap);
   bindPlayerKeys(video);
   bindTapSeek(video, playerWrap);
   bindNativeFullscreenGuard(video, playerWrap, landscapeBtn);
