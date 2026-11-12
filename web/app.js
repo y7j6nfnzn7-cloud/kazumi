@@ -3269,13 +3269,17 @@ async function renderBangumiDetail(params) {
       el("div", { class: "hero-meta" }, heroInfoCol, collectBtn))));
   page.append(hero);
 
-  // 源提前实测：详情页打开就后台测第 1 集在各源的状态，边测边显示在状态行；
-  // 点播直接用测好的最优源（见 autoPlayBangumi）。字幕也是同样提前准备的。
+  // 源提前实测：详情页打开就后台测目标集在各源的状态，边测边显示在状态行；
+  // 点播直接用测好的最优源（见 autoPlayBangumi）。目标集 = 上次看到的集
+  // （各源里最大的，没记录默认第 1 集），不能永远只测第 1 集。
+  // 字幕也是同样提前准备的。
   if (!isUpcomingItem(bangumi)) {
     const srcStatus = el("div", { class: "src-status" }, "正在测哪个源能播…");
     page.append(srcStatus);
-    pretestEpisodeSources(bangumi, 1, (results, done) => {
-      srcStatus.textContent = srcStatusText(results, done);
+    getTargetEpisode(String(bangumi.id)).then((targetEp) => {
+      pretestEpisodeSources(bangumi, targetEp, (results, done) => {
+        srcStatus.textContent = srcStatusText(results, done);
+      });
     });
   }
 
@@ -3653,10 +3657,29 @@ function getCachedResolve(plugin, episodeUrl) {
 function setCachedResolve(plugin, episodeUrl, data, ms) {
   try { localStorage.setItem(srcResolveCacheKey(plugin, episodeUrl), JSON.stringify({ at: Date.now(), data, ms })); } catch (_) {}
 }
-// 实测一集在各源的状态。只搜不取集挑前 2 个候选，只对这 2 个取集数（逐个、
-// 5 秒超时）；解析按速度排序逐个测，第一个能解析的就是最优源，测出即停。
-// 其余源显示“未测”而不是“超时”。onUpdate(results, done) 每次有新结果就
-// 回调一次，页面边测边显示。返回按“能播优先、延迟从低到高”排好的结果数组。
+// 目标集 = 各源上次看到的集里最大的（没记录默认第 1 集）。详情页预告和
+// “开始观看”快路都要测/播这一集，不能永远只测第 1 集；缓存 key 本来就含
+// 集号（srcTest:bid:epNum），两边用同一集号就不会串。
+async function getTargetEpisode(bid, plugins) {
+  try {
+    const list = plugins && plugins.length ? plugins : await fetchJson("/api/plugins");
+    const hists = await withTimeout(Promise.all((list || []).map((p) =>
+      fetchJson("/api/history?bangumiId=" + encodeURIComponent(bid) + "&pluginName=" + encodeURIComponent(p.name)).catch(() => null)
+    )), 3000);
+    let ep = 1;
+    (hists || []).forEach((h) => {
+      const lw = h && h.history && h.history.lastWatchEpisode;
+      if (lw > 0 && lw > ep) ep = lw;
+    });
+    return ep;
+  } catch (_) { return 1; }
+}
+// 实测一集在各源的状态。只搜不取集：标题分 ≥20 才有资格测，分只决定资格，
+// 不决定顺序；测的顺序只看解析速度（快的 guangsu、7sefun 在前，AGE 最后）。
+// 逐个源完整走完“取集数（5 秒封顶）→ 有这集就解析（5 秒封顶）”，第一个
+// 解析成功的就是最优源，立即停。其余源显示“未测”而不是“超时”。
+// onUpdate(results, done) 每次有新结果就回调一次，页面边测边显示。
+// 返回按“能播优先、延迟从低到高”排好的结果数组。
 async function pretestEpisodeSources(bangumi, epNum, onUpdate) {
   const bid = String(bangumi.id);
   const cached = readSrcTest(bid, epNum);
@@ -3684,55 +3707,49 @@ async function pretestEpisodeSources(bangumi, epNum, onUpdate) {
         return { plugin: p.name, best, score: best ? best.score : 0 };
       } catch (_) { return { plugin: p.name, best: null, score: 0 }; }
     }));
-    const withBest = searched.filter((s) => s.best).sort((a, b) => b.score - a.score);
-    const top2 = withBest.slice(0, 2);
-    const top2Names = new Set(top2.map((s) => s.plugin));
+    // 有资格的候选：标题分 ≥20 的全部都测，不再只挑前 2 个（前 2 名按标题分
+    // 可能是慢的 AGE、MXdm，快的 guangsu、7sefun 根本轮不到）。顺序只看
+    // 解析速度，同速的再按标题分排。
+    const cands = searched
+      .filter((s) => s.best)
+      .sort((a, b) => (srcResolveRank(a.plugin) - srcResolveRank(b.plugin)) || (b.score - a.score));
     searched.forEach((s) => {
-      const r = byName[s.plugin];
-      if (!s.best) { r.state = "noResult"; r.reason = "搜不到"; }
-      else if (!top2Names.has(s.plugin)) { r.state = "untested"; r.reason = "未测"; }
+      if (!s.best) { const r = byName[s.plugin]; r.state = "noResult"; r.reason = "搜不到"; }
     });
     emit(false);
-    // 2）只对前 2 个候选取集数：逐个取，每次 5 秒超时（/api/episodes 慢/串行，
-    // 并行取 5 个会拖垮整个预告）。
-    const withEp = [];
-    for (const s of top2) {
+    // 2）逐个源完整走完“取集数（5 秒封顶）→ 有这集就解析（5 秒封顶）”，
+    // 第一个解析成功的就是最优源，立即停。取集数失败/没这集就跳下一个。
+    // 快的源在前，慢的 AGE 最后，不让慢源堵住服务端队列。
+    for (const s of cands) {
       const r = byName[s.plugin];
+      let epSrc = null;
       try {
         const info = await withTimeout(loadRoadsAndHistory(s.plugin, s.best.item.src, bid), SRC_TEST_TIMEOUT_MS);
         const ep = info ? ((info.roads || []).map((x) => ((x.episodes || [])[epNum - 1])).find(Boolean)) || null : null;
-        if (!info) { r.state = "noEp"; r.reason = "取集数失败"; }
-        else if (!ep) { r.state = "noEp"; r.reason = "没这集"; }
-        else withEp.push({ plugin: s.plugin, score: s.score, src: s.best.item.src, epSrc: ep.src });
-      } catch (_) { r.state = "noEp"; r.reason = "取集数失败"; }
-      emit(false);
-    }
-    // 3）解析只测最优候选：按解析速度排序，先测快的，第一个能解析的即最优，
-    // 测出即停。解析结果已在缓存里（15 分钟内）的直接用，不再调服务端。
-    const ordered = withEp.slice().sort((a, b) => (srcResolveRank(a.plugin) - srcResolveRank(b.plugin)) || (b.score - a.score));
-    for (const c of ordered) {
-      const r = byName[c.plugin];
-      const cachedResolve = getCachedResolve(c.plugin, c.epSrc);
+        if (!ep) { r.state = "noEp"; r.reason = "没这集"; emit(false); continue; }
+        epSrc = ep.src;
+      } catch (_) { r.state = "noEp"; r.reason = "取集数失败"; emit(false); continue; }
+      const cachedResolve = getCachedResolve(s.plugin, epSrc);
       if (cachedResolve) {
-        r.state = "ok"; r.ms = cachedResolve.ms; r.reason = ""; r.src = c.src; r.epSrc = c.epSrc;
+        r.state = "ok"; r.ms = cachedResolve.ms; r.reason = ""; r.src = s.best.item.src; r.epSrc = epSrc;
         emit(false);
         break;
       }
-      const t = await testResolve(c.plugin, c.epSrc);
+      const t = await testResolve(s.plugin, epSrc);
       r.state = t.ok ? "ok" : "fail";
       r.ms = t.ms;
       r.reason = t.ok ? "" : t.reason;
       if (t.ok) {
-        r.src = c.src; r.epSrc = c.epSrc;
-        setCachedResolve(c.plugin, c.epSrc, t.data, t.ms);
+        r.src = s.best.item.src; r.epSrc = epSrc;
+        setCachedResolve(s.plugin, epSrc, t.data, t.ms);
         emit(false);
         break;
       }
       emit(false);
     }
     // 已测出最优而停下的候选：标“未测”，别写成失败。
-    ordered.forEach((c) => {
-      const r = byName[c.plugin];
+    cands.forEach((s) => {
+      const r = byName[s.plugin];
       if (r.state === "pending") { r.state = "untested"; r.reason = "未测"; }
     });
     const out = results.slice();
@@ -3777,34 +3794,42 @@ async function autoPlayBangumi(bangumi) {
   }
   if (!plugins.length) { openSourcePicker(bangumi); return; }
   // 2026-11-11：详情页预告已测好最优源、解析结果也在缓存里时直接播，
-  // 不再重新全源搜索——点开到出画面要压进 5 秒。预告测的是第 1 集，
-  // 所以只有要播的集就是第 1 集（各源都没有上次观看记录）时才走这条快路；
-  // 有上次记录、或缓存过期，就走下面的现有路径。
+  // 不再重新全源搜索——点开到出画面要压进 5 秒。预告测的是目标集
+  // （上次看到的集，没记录默认第 1 集），所以快路只看目标集的缓存，
+  // 有记录也走快路，不要求一定是第 1 集；缓存过期就走下面的现有路径。
   {
     const bid0 = String(bangumi.id);
-    const pre = readSrcTest(bid0, 1);
+    const targetEp = await getTargetEpisode(bid0, plugins);
+    const pre = readSrcTest(bid0, targetEp);
     const bestPre = pre && pre.find((x) => x.state === "ok" && x.epSrc && x.src);
     if (bestPre) {
-      let targetEp = 1;
-      let histOk = true;
-      try {
-        // 各源的观看记录是分开记的，并行查一遍；任何一源有记录就按记录播。
-        const hists = await withTimeout(Promise.all(plugins.map((p) =>
-          fetchJson("/api/history?bangumiId=" + encodeURIComponent(bid0) + "&pluginName=" + encodeURIComponent(p.name)).catch(() => null)
-        )), 3000);
-        (hists || []).forEach((h) => {
-          const lw = h && h.history && h.history.lastWatchEpisode;
-          if (lw > 0 && lw > targetEp) targetEp = lw;
-        });
-      } catch (_) { histOk = false; }
-      if (histOk && targetEp === 1) {
-        const cached = getCachedResolve(bestPre.plugin, bestPre.epSrc);
-        if (cached) {
-          localStorage.setItem("lastPlugin", bestPre.plugin);
-          toast("已选最优源：" + bestPre.plugin + "（解析 " + (cached.ms / 1000).toFixed(1) + " 秒）");
-          startPlayback({ plugin: bestPre.plugin, src: bestPre.src, title, bid: bid0 });
-          return;
+      const cached = getCachedResolve(bestPre.plugin, bestPre.epSrc);
+      if (cached) {
+        // 取一次选集（和 startPlayback 本来就要取的同一通调用），好把
+        // 目标集传进去；取不到就让 startPlayback 自己取。
+        let roads = null;
+        let lw = null;
+        try {
+          const info = await withTimeout(loadRoadsAndHistory(bestPre.plugin, bestPre.src, bid0), SRC_TEST_TIMEOUT_MS);
+          roads = info ? info.roads : null;
+          lw = info ? info.lastWatched : null;
+        } catch (_) {}
+        // 断点：该源服务端记的集就是目标集时用它记的断点续播；否则从
+        // 目标集开头播（该源没看过这一集，或是在别的源看的）。
+        if (!lw || lw.episode !== targetEp) {
+          let roadIdx = 0;
+          if (roads) {
+            const ri = roads.findIndex((rd) => ((rd.episodes || [])[targetEp - 1]));
+            if (ri >= 0) roadIdx = ri;
+          }
+          lw = { episode: targetEp, road: roadIdx, progressMs: 0 };
         }
+        localStorage.setItem("lastPlugin", bestPre.plugin);
+        toast("已选最优源：" + bestPre.plugin + "（解析 " + (cached.ms / 1000).toFixed(1) + " 秒）");
+        startPlayback(roads
+          ? { plugin: bestPre.plugin, src: bestPre.src, title, bid: bid0, roads, lastWatched: lw }
+          : { plugin: bestPre.plugin, src: bestPre.src, title, bid: bid0 });
+        return;
       }
     }
   }
