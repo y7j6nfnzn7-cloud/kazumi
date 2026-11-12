@@ -178,6 +178,11 @@ async function fetchWithTimeout(url, init, ms) {
   try { return await fetch(url, Object.assign({}, init, { signal: c.signal })); }
   finally { clearTimeout(t); }
 }
+// 给没有自带超时的多步查询加一个上限：超时就按失败算，不让一个挂住的源
+// 拖住整个预告（/api/episodes 本身没超时，fetchJson 还会重试一次）。
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
+}
 function pluginFailedRecently(name) {
   if (!name || SESSION_PARSE_FAILED.has(name)) return !!name && SESSION_PARSE_FAILED.has(name);
   try {
@@ -3606,6 +3611,13 @@ async function pluginSearchBest(pluginName, titles) {
 // ============================================================
 const SRC_TEST_TTL_MS = 15 * 60 * 1000; // 实测结果 15 分钟内有效
 const SRC_TEST_TIMEOUT_MS = 5000; // 单个源解析实测 5 秒没出结果就是失败
+// 解析速度排序：后端一次只能处理一个解析，客户端 abort 也取消不了服务端
+// 正在跑的任务；排在前面的慢源会把服务端队列堵住，后面的全排队超时。
+// 实测：guangsu 0.2–0.7 秒、7sefun 约 1.9 秒、AGE 对吞噬第 1 集 20.8 秒才 504。
+// 所以先测快的，AGE 最后；第一个能解析的就是最优源，测出即停。
+const SRC_RESOLVE_SPEED = { guangsu: 0, "7sefun": 1, MXdm: 2, mgnacg: 3, AGE: 4 };
+function srcResolveRank(name) { return Object.prototype.hasOwnProperty.call(SRC_RESOLVE_SPEED, name) ? SRC_RESOLVE_SPEED[name] : 2; }
+const SRC_PRETEST_BUDGET_MS = 10000; // 整个预告 10 秒没出完就先显示已测到的
 function srcTestKey(bid, epNum) { return "srcTest:" + bid + ":" + epNum; }
 function readSrcTest(bid, epNum) {
   try {
@@ -3641,9 +3653,10 @@ function getCachedResolve(plugin, episodeUrl) {
 function setCachedResolve(plugin, episodeUrl, data, ms) {
   try { localStorage.setItem(srcResolveCacheKey(plugin, episodeUrl), JSON.stringify({ at: Date.now(), data, ms })); } catch (_) {}
 }
-// 实测一集在各源的状态。搜+取集数并行；解析逐个测（后端一次只能处理一个解析，
-// 并发会卡住）。onUpdate(results, done) 每次有新结果就回调一次，页面边测边显示。
-// 返回按“能播优先、延迟从低到高”排好的结果数组。
+// 实测一集在各源的状态。只搜不取集挑前 2 个候选，只对这 2 个取集数（逐个、
+// 5 秒超时）；解析按速度排序逐个测，第一个能解析的就是最优源，测出即停。
+// 其余源显示“未测”而不是“超时”。onUpdate(results, done) 每次有新结果就
+// 回调一次，页面边测边显示。返回按“能播优先、延迟从低到高”排好的结果数组。
 async function pretestEpisodeSources(bangumi, epNum, onUpdate) {
   const bid = String(bangumi.id);
   const cached = readSrcTest(bid, epNum);
@@ -3656,41 +3669,84 @@ async function pretestEpisodeSources(bangumi, epNum, onUpdate) {
   let plugins = [];
   try { plugins = await fetchJson("/api/plugins"); } catch (_) { return []; }
   if (!plugins.length) return [];
-  const cands = await Promise.all(plugins.map(async (p) => {
-    try {
-      const r = await pluginSearchBest(p.name, titles);
-      const best = r && r.best && r.best.score >= 20 ? r.best : null;
-      if (!best) return { plugin: p.name, state: "noResult", reason: "搜不到", ms: 0, score: 0 };
-      let info = null;
-      try { info = await loadRoadsAndHistory(p.name, best.item.src, bid); } catch (_) { return { plugin: p.name, state: "noEp", reason: "取集数失败", ms: 0, score: best.score }; }
-      const ep = ((info.roads || []).map((x) => ((x.episodes || [])[epNum - 1])).find(Boolean)) || null;
-      if (!ep) return { plugin: p.name, state: "noEp", reason: "没这集", ms: 0, score: best.score };
-      return { plugin: p.name, state: "pending", score: best.score, epSrc: ep.src };
-    } catch (_) { return { plugin: p.name, state: "noResult", reason: "搜不到", ms: 0, score: 0 }; }
-  }));
-  let clean = { clean: {}, dirty: [] };
-  try { clean = await loadCleanSources(); } catch (_) {}
-  const isClean = (n) => (clean.clean && clean.clean[n]) ? 0 : 1;
-  const toTest = cands.filter((c) => c.epSrc).sort((a, b) => (b.score - a.score) || (isClean(a.plugin) - isClean(b.plugin)));
-  const done0 = cands.filter((c) => !c.epSrc);
-  const emit = (done) => { if (onUpdate) onUpdate(toTest.concat(done0).map((o) => ({ plugin: o.plugin, state: o.state, ms: o.ms || 0, reason: o.reason || "" })), done); };
-  emit(false);
-  for (const c of toTest) {
-    const t = await testResolve(c.plugin, c.epSrc);
-    c.state = t.ok ? "ok" : "fail";
-    c.ms = t.ms;
-    c.reason = t.ok ? "" : t.reason;
-    if (t.ok) setCachedResolve(c.plugin, c.epSrc, t.data, t.ms);
+  // 结果数组先建好，边测边更新；全局超时到时就显示这份已测到的结果，
+  // 不让“正在测…”挂 60 秒。后台继续测，测出新的会再更新状态行。
+  const results = plugins.map((p) => ({ plugin: p.name, state: "pending", ms: 0, reason: "" }));
+  const byName = {};
+  results.forEach((r) => { byName[r.plugin] = r; });
+  const emit = (done) => { if (onUpdate) onUpdate(results.slice(), done); };
+  const run = async () => {
+    // 1）只搜不取集：5 个源并行搜（/api/search 快），每个搜 5 秒封顶。
+    const searched = await Promise.all(plugins.map(async (p) => {
+      try {
+        const r = await withTimeout(pluginSearchBest(p.name, titles), SRC_TEST_TIMEOUT_MS);
+        const best = r && r.best && r.best.score >= 20 ? r.best : null;
+        return { plugin: p.name, best, score: best ? best.score : 0 };
+      } catch (_) { return { plugin: p.name, best: null, score: 0 }; }
+    }));
+    const withBest = searched.filter((s) => s.best).sort((a, b) => b.score - a.score);
+    const top2 = withBest.slice(0, 2);
+    const top2Names = new Set(top2.map((s) => s.plugin));
+    searched.forEach((s) => {
+      const r = byName[s.plugin];
+      if (!s.best) { r.state = "noResult"; r.reason = "搜不到"; }
+      else if (!top2Names.has(s.plugin)) { r.state = "untested"; r.reason = "未测"; }
+    });
     emit(false);
-  }
-  const ordered = toTest.concat(done0).sort((a, b) => {
-    const ao = a.state === "ok" ? 0 : 1, bo = b.state === "ok" ? 0 : 1;
-    return (ao - bo) || ((a.ms || 0) - (b.ms || 0));
-  });
-  const out = ordered.map((o) => ({ plugin: o.plugin, state: o.state, ms: o.ms || 0, reason: o.reason || "" }));
-  writeSrcTest(bid, epNum, out);
-  if (onUpdate) onUpdate(out.slice(), true);
-  return out;
+    // 2）只对前 2 个候选取集数：逐个取，每次 5 秒超时（/api/episodes 慢/串行，
+    // 并行取 5 个会拖垮整个预告）。
+    const withEp = [];
+    for (const s of top2) {
+      const r = byName[s.plugin];
+      try {
+        const info = await withTimeout(loadRoadsAndHistory(s.plugin, s.best.item.src, bid), SRC_TEST_TIMEOUT_MS);
+        const ep = info ? ((info.roads || []).map((x) => ((x.episodes || [])[epNum - 1])).find(Boolean)) || null : null;
+        if (!info) { r.state = "noEp"; r.reason = "取集数失败"; }
+        else if (!ep) { r.state = "noEp"; r.reason = "没这集"; }
+        else withEp.push({ plugin: s.plugin, score: s.score, src: s.best.item.src, epSrc: ep.src });
+      } catch (_) { r.state = "noEp"; r.reason = "取集数失败"; }
+      emit(false);
+    }
+    // 3）解析只测最优候选：按解析速度排序，先测快的，第一个能解析的即最优，
+    // 测出即停。解析结果已在缓存里（15 分钟内）的直接用，不再调服务端。
+    const ordered = withEp.slice().sort((a, b) => (srcResolveRank(a.plugin) - srcResolveRank(b.plugin)) || (b.score - a.score));
+    for (const c of ordered) {
+      const r = byName[c.plugin];
+      const cachedResolve = getCachedResolve(c.plugin, c.epSrc);
+      if (cachedResolve) {
+        r.state = "ok"; r.ms = cachedResolve.ms; r.reason = ""; r.src = c.src; r.epSrc = c.epSrc;
+        emit(false);
+        break;
+      }
+      const t = await testResolve(c.plugin, c.epSrc);
+      r.state = t.ok ? "ok" : "fail";
+      r.ms = t.ms;
+      r.reason = t.ok ? "" : t.reason;
+      if (t.ok) {
+        r.src = c.src; r.epSrc = c.epSrc;
+        setCachedResolve(c.plugin, c.epSrc, t.data, t.ms);
+        emit(false);
+        break;
+      }
+      emit(false);
+    }
+    // 已测出最优而停下的候选：标“未测”，别写成失败。
+    ordered.forEach((c) => {
+      const r = byName[c.plugin];
+      if (r.state === "pending") { r.state = "untested"; r.reason = "未测"; }
+    });
+    const out = results.slice();
+    // 只有至少一个源能播才缓存；全失败不缓存，下次进详情页重新测，
+    // 不许再把“全部不可用”缓存 15 分钟。
+    if (out.some((o) => o.state === "ok")) writeSrcTest(bid, epNum, out);
+    emit(true);
+    return out;
+  };
+  const timeout = new Promise((resolve) => setTimeout(() => {
+    emit(true);
+    resolve(results.slice());
+  }, SRC_PRETEST_BUDGET_MS));
+  return Promise.race([run(), timeout]);
 }
 function srcStatusText(results, done) {
   if (!results || !results.length) return done ? "没有可用规则" : "正在测哪个源能播…";
@@ -3702,6 +3758,7 @@ function srcStatusText(results, done) {
   const parts = results.map((r) => {
     if (r.state === "ok") return r.plugin + " " + (r.ms / 1000).toFixed(1) + "s ✓";
     if (r.state === "fail") return r.plugin + " " + (r.reason || "播不了") + " ✗";
+    if (r.state === "untested") return r.plugin + " 未测";
     if (r.state === "pending") return r.plugin + " 测速中…";
     return r.plugin + " " + (r.reason || "无此剧");
   });
@@ -3719,6 +3776,38 @@ async function autoPlayBangumi(bangumi) {
     return;
   }
   if (!plugins.length) { openSourcePicker(bangumi); return; }
+  // 2026-11-11：详情页预告已测好最优源、解析结果也在缓存里时直接播，
+  // 不再重新全源搜索——点开到出画面要压进 5 秒。预告测的是第 1 集，
+  // 所以只有要播的集就是第 1 集（各源都没有上次观看记录）时才走这条快路；
+  // 有上次记录、或缓存过期，就走下面的现有路径。
+  {
+    const bid0 = String(bangumi.id);
+    const pre = readSrcTest(bid0, 1);
+    const bestPre = pre && pre.find((x) => x.state === "ok" && x.epSrc && x.src);
+    if (bestPre) {
+      let targetEp = 1;
+      let histOk = true;
+      try {
+        // 各源的观看记录是分开记的，并行查一遍；任何一源有记录就按记录播。
+        const hists = await withTimeout(Promise.all(plugins.map((p) =>
+          fetchJson("/api/history?bangumiId=" + encodeURIComponent(bid0) + "&pluginName=" + encodeURIComponent(p.name)).catch(() => null)
+        )), 3000);
+        (hists || []).forEach((h) => {
+          const lw = h && h.history && h.history.lastWatchEpisode;
+          if (lw > 0 && lw > targetEp) targetEp = lw;
+        });
+      } catch (_) { histOk = false; }
+      if (histOk && targetEp === 1) {
+        const cached = getCachedResolve(bestPre.plugin, bestPre.epSrc);
+        if (cached) {
+          localStorage.setItem("lastPlugin", bestPre.plugin);
+          toast("已选最优源：" + bestPre.plugin + "（解析 " + (cached.ms / 1000).toFixed(1) + " 秒）");
+          startPlayback({ plugin: bestPre.plugin, src: bestPre.src, title, bid: bid0 });
+          return;
+        }
+      }
+    }
+  }
   toast("正在测哪个源最快…");
   const titles = [];
   if (bangumi.nameCn) titles.push(bangumi.nameCn);
