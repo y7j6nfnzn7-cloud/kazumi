@@ -652,6 +652,76 @@ function nativeHlsSupported(video) {
   );
 }
 
+// 预加载感知的 hls.js loader（2026-11-11）：详情页预告测出最优源后，
+// preloadOptimalStream 已把清单 + 密钥 + 前两段取到内存
+// （window.__kazumiPreload.store，key 是绝对地址）。hls.js 要拉这些
+// 地址时先查内存，命中直接回包，不命中就交给 hls.js 默认 loader 走
+// 网络——播放器其它行为（跳片头、换源、锁、画质）一概不动。
+// loader 构造收 hls config（hls.js 内部 new loader(config)）；
+// load(context, config, callbacks) 按 hls.js v1.x loader 约定回包。
+class PreloadAwareLoader {
+  constructor(config) {
+    this.config = config;
+    this._fallback = null;
+    this._aborted = false;
+  }
+  _defaultLoaderClass() {
+    try {
+      return (typeof Hls !== "undefined" && Hls.DefaultConfig && Hls.DefaultConfig.loader) || null;
+    } catch (_) { return null; }
+  }
+  load(context, config, callbacks) {
+    this._aborted = false;
+    const store = (typeof window !== "undefined" && window.__kazumiPreload && window.__kazumiPreload.store) || null;
+    let entry = null;
+    if (store && context && context.url) {
+      entry = store.get(context.url) || null;
+      if (!entry) {
+        // hls.js 有时传相对地址，预加载存的是绝对地址，再按绝对地址查一次
+        try { entry = store.get(new URL(context.url, location.href).href) || null; } catch (_) {}
+      }
+    }
+    if (entry) {
+      // 命中预加载内存：按 responseType 回包（清单是 text，分片/密钥是 arraybuffer）
+      const t0 = performance.now();
+      const stats = {
+        aborted: false, loaded: entry.byteLength, total: entry.byteLength,
+        retry: 0, chunkCount: 0, bandwidth: 0,
+        loading: { start: t0, first: t0 + 1, end: t0 + 2 },
+        parsing: { start: t0, end: t0 + 2 },
+        buffering: { start: t0, first: t0 + 1, end: t0 + 2 },
+      };
+      let data = entry;
+      if (context.responseType === "text" || context.responseType === "json") {
+        try { data = new TextDecoder().decode(entry); } catch (_) { data = ""; }
+        if (context.responseType === "json") { try { data = JSON.parse(data); } catch (_) {} }
+      }
+      setTimeout(() => {
+        if (this._aborted) return;
+        try { callbacks.onSuccess({ url: context.url, data }, stats, context, null); } catch (_) {}
+      }, 0);
+      return;
+    }
+    // 未命中：走默认 loader（和以前完全一样）
+    const DefaultLoader = this._defaultLoaderClass();
+    if (DefaultLoader) {
+      this._fallback = new DefaultLoader(this.config);
+      this._fallback.load(context, config, callbacks);
+    } else if (callbacks && typeof callbacks.onError === "function") {
+      try { callbacks.onError({ code: 0, text: "no loader" }, context, null, null); } catch (_) {}
+    }
+  }
+  abort() {
+    this._aborted = true;
+    if (this._fallback && typeof this._fallback.abort === "function") { try { this._fallback.abort(); } catch (_) {} }
+  }
+  destroy() {
+    this._aborted = true;
+    if (this._fallback && typeof this._fallback.destroy === "function") { try { this._fallback.destroy(); } catch (_) {} }
+    this._fallback = null;
+  }
+}
+
 async function attachStream(video, data, onError) {
   const streamType = data.streamType || "unknown";
   const looksLikeHls = streamType === "hls" || /\.m3u8/i.test(data.originalUrl || "");
@@ -666,6 +736,7 @@ async function attachStream(video, data, onError) {
     const hls = new Hls({
       enableWorker: true,
       lowLatencyMode: false,
+      loader: PreloadAwareLoader,
     });
     activeHls = hls;
     hls.on(Hls.Events.MANIFEST_PARSED, () => {

@@ -3279,6 +3279,9 @@ async function renderBangumiDetail(params) {
     getTargetEpisode(String(bangumi.id)).then((targetEp) => {
       pretestEpisodeSources(bangumi, targetEp, (results, done) => {
         srcStatus.textContent = srcStatusText(results, done);
+        // 预告一测出最优源就后台预加载该集流，点开直接读内存（见 preloadOptimalStream）
+        const best = results && results.find((r) => r.state === "ok" && r.epSrc);
+        if (best) preloadOptimalStream(best.plugin, best.epSrc);
       });
     });
   }
@@ -3764,6 +3767,65 @@ async function pretestEpisodeSources(bangumi, epNum, onUpdate) {
     resolve(results.slice());
   }, SRC_PRETEST_BUDGET_MS));
   return Promise.race([run(), timeout]);
+}
+// ====== 详情页流预加载（2026-11-11：点开 5 秒内没出画面就是失败）======
+// 预告测出最优源后，后台把该集的 HLS 清单 + 密钥 + 前两段取到内存
+// （window.__kazumiPreload），点“开始观看”时播放器用自定义 loader
+// 直接读内存，不用再等网络。注意：/proxy/ 返回的清单和分片都是
+// Cache-Control: no-store，进不了浏览器 HTTP 缓存，所以必须走内存 +
+// 自定义 loader；只预加载目标集、不自动播放、不出声，用户没点开详情页
+// 时不触发；播放器其它行为（跳片头、换源、锁）一概不动。
+const PRELOAD_SEGMENTS = 2;        // 预加载前几段（每段约 10 秒，2 段约 4MB）
+const PRELOAD_TIMEOUT_MS = 20000;  // 整个预加载 20 秒封顶，超时就停
+let __preloadInFlight = null;      // 正在预加载的 playUrl，避免重复触发
+function preloadOptimalStream(plugin, epSrc) {
+  try {
+    const cached = getCachedResolve(plugin, epSrc);
+    if (!cached || !cached.data || !cached.data.playUrl) return;
+    const data = cached.data;
+    const isHls = data.streamType === "hls" || /\.m3u8/i.test(data.originalUrl || "");
+    if (!isHls) return;
+    const playUrl = data.playUrl;
+    const absPlayUrl = new URL(playUrl, location.href).href;
+    const cur = window.__kazumiPreload;
+    if (cur && cur.playUrl === absPlayUrl && cur.ready) return; // 已预加载好
+    if (__preloadInFlight === absPlayUrl) return;               // 正在加载
+    __preloadInFlight = absPlayUrl;
+    const store = new Map();
+    window.__kazumiPreload = { playUrl: absPlayUrl, ready: false, at: Date.now(), store };
+    const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+    (async () => {
+      try {
+        // 1）清单（Map 的 key 统一用绝对地址，和 hls.js 请求的 context.url 对得上）
+        const mr = await withTimeout(fetch(playUrl, { credentials: "same-origin" }), PRELOAD_TIMEOUT_MS);
+        if (!mr.ok) return;
+        const mbuf = await mr.arrayBuffer();
+        store.set(absPlayUrl, mbuf);
+        const text = new TextDecoder().decode(mbuf);
+        // 2）密钥 + 前两段（相对地址按清单 URL 解析）
+        const base = /^https?:\/\//i.test(playUrl) ? playUrl : location.origin + playUrl;
+        const keyM = text.match(/#EXT-X-KEY[^\n]*URI="([^"]+)"/);
+        const segLines = text.split("\n").map((l) => l.trim()).filter((l) => l && l[0] !== "#");
+        const urls = [];
+        if (keyM && keyM[1]) { try { urls.push(new URL(keyM[1], base).href); } catch (_) {} }
+        segLines.slice(0, PRELOAD_SEGMENTS).forEach((l) => { try { urls.push(new URL(l, base).href); } catch (_) {} });
+        await Promise.all(urls.map(async (u) => {
+          try {
+            const r = await withTimeout(fetch(u, { credentials: "same-origin" }), PRELOAD_TIMEOUT_MS);
+            if (r.ok) store.set(u, await r.arrayBuffer());
+          } catch (_) {}
+        }));
+        // 3）hls.min.js 也顺手预热（它本身可缓存，fetch 一次进 HTTP 缓存）
+        try { await withTimeout(fetch("/assets/hls.min.js", { credentials: "same-origin" }), 10000); } catch (_) {}
+        window.__kazumiPreload.ready = true;
+        window.__kazumiPreload.at = Date.now();
+      } catch (_) {
+        // 预加载失败不影响正常播放（播放器走默认 loader 重新拉）
+      } finally {
+        if (__preloadInFlight === absPlayUrl) __preloadInFlight = null;
+      }
+    })();
+  } catch (_) {}
 }
 function srcStatusText(results, done) {
   if (!results || !results.length) return done ? "没有可用规则" : "正在测哪个源能播…";
