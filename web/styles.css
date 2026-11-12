@@ -1338,3 +1338,6 @@ video::cue { background: rgba(0,0,0,0.6); color: #fff; font-size: 16px; }
 .footer { margin-top: 32px; font-size: var(--label-small-size); color: var(--on-surface-variant); text-align: center; letter-spacing: 0.5px; }
 select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .search-box input:focus-visible, .hist-search input:focus-visible { outline: none; }
+
+/* 源状态行（详情页）：提前实测各源能不能播、延迟多少，点开详情页就显示 */
+.src-status { margin: 8px 16px 0; font-size: 12px; line-height: 1.6; color: #888; text-align: center; }

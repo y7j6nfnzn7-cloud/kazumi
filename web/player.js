@@ -1311,14 +1311,21 @@ async function renderPlayer(params) {
         // 跳页前先直接解析验证：能解析才跳，不行就地换下一个，不白跳一次整页。
         // （吞噬第 1 集教训：AGE 解析 20 秒超时，盲跳到 MXdm 又超时，光速/7sefun 明明 1 秒能解析却没走到。）
         let okRes = null;
-        try {
-          const rc2 = new AbortController();
-          const rt2 = setTimeout(() => rc2.abort(), 10000);
+        let okMs = 0;
+        const cached2 = (typeof getCachedResolve === "function") ? getCachedResolve(p.name, eps[epNum - 1].src) : null;
+        if (cached2) { okRes = cached2.data; okMs = cached2.ms; }
+        else {
           try {
-            const rr = await fetch("/api/resolve?plugin=" + encodeURIComponent(p.name) + "&episodeUrl=" + encodeURIComponent(eps[epNum - 1].src), { signal: rc2.signal });
-            if (rr.ok) okRes = await rr.json();
-          } finally { clearTimeout(rt2); }
-        } catch (_) {}
+            const _s2 = performance.now();
+            const rc2 = new AbortController();
+            const rt2 = setTimeout(() => rc2.abort(), 5000);
+            try {
+              const rr = await fetch("/api/resolve?plugin=" + encodeURIComponent(p.name) + "&episodeUrl=" + encodeURIComponent(eps[epNum - 1].src), { signal: rc2.signal });
+              if (rr.ok) { okRes = await rr.json(); okMs = Math.round(performance.now() - _s2); }
+            } finally { clearTimeout(rt2); }
+          } catch (_) {}
+          if (okRes) { try { if (typeof setCachedResolve === "function") setCachedResolve(p.name, eps[epNum - 1].src, okRes, okMs); } catch (_) {} }
+        }
         if (!okRes) { switchLog.push(p.name + " 解析失败"); switchTried.add(p.name); markPluginParseFailed(p.name); continue; }
         localStorage.setItem("lastPlugin", p.name);
         toast("已自动换源，正在解析…");
@@ -1334,15 +1341,23 @@ async function renderPlayer(params) {
     return { switched: false, hadOthers, log: switchLog };
   }
   try {
-    // 解析 20 秒超时：一次 504 不能拖 35 秒；超时按解析失败走自动换源。
-    const rc = new AbortController();
-    const rt = setTimeout(() => rc.abort(), 20000);
-    let rres;
-    try { rres = await fetch("/api/resolve?plugin=" + encodeURIComponent(plugin) + "&episodeUrl=" + encodeURIComponent(episodeUrl), { signal: rc.signal }); }
-    finally { clearTimeout(rt); }
-    if (!rres.ok) throw new Error("HTTP " + rres.status + ": " + rres.statusText);
-    data = await rres.json();
-    resolveMs = Math.round(performance.now() - resolveStart);
+    // 2026-11-11 用户定：5 秒没进去就是失败。详情页/选源时实测过的解析结果
+    // （15 分钟内）直接用，不用再解析一次；没现成结果才解析，5 秒超时就换源。
+    const cached = (typeof getCachedResolve === "function") ? getCachedResolve(plugin, episodeUrl) : null;
+    if (cached) {
+      data = cached.data;
+      resolveMs = cached.ms;
+    } else {
+      const rc = new AbortController();
+      const rt = setTimeout(() => rc.abort(), 5000);
+      let rres;
+      try { rres = await fetch("/api/resolve?plugin=" + encodeURIComponent(plugin) + "&episodeUrl=" + encodeURIComponent(episodeUrl), { signal: rc.signal }); }
+      finally { clearTimeout(rt); }
+      if (!rres.ok) throw new Error("HTTP " + rres.status + ": " + rres.statusText);
+      data = await rres.json();
+      resolveMs = Math.round(performance.now() - resolveStart);
+      try { if (typeof setCachedResolve === "function") setCachedResolve(plugin, episodeUrl, data, resolveMs); } catch (_) {}
+    }
     try {
       const lat = JSON.parse(localStorage.getItem("pluginLatency") || "{}") || {};
       lat[plugin] = resolveMs;

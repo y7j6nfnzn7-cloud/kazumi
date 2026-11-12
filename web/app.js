@@ -3264,6 +3264,16 @@ async function renderBangumiDetail(params) {
       el("div", { class: "hero-meta" }, heroInfoCol, collectBtn))));
   page.append(hero);
 
+  // 源提前实测：详情页打开就后台测第 1 集在各源的状态，边测边显示在状态行；
+  // 点播直接用测好的最优源（见 autoPlayBangumi）。字幕也是同样提前准备的。
+  if (!isUpcomingItem(bangumi)) {
+    const srcStatus = el("div", { class: "src-status" }, "正在测哪个源能播…");
+    page.append(srcStatus);
+    pretestEpisodeSources(bangumi, 1, (results, done) => {
+      srcStatus.textContent = srcStatusText(results, done);
+    });
+  }
+
   // Tabs（info_page.dart：概览 / 吐槽 / 角色 / 制作人员）
   const tabBar = el("div", { class: "tabs is-centered no-divider detail-tabs", role: "tablist" });
   const tabBody = el("div", {});
@@ -3589,6 +3599,116 @@ async function pluginSearchBest(pluginName, titles) {
 // 不做首选，全部失败过才按延迟从低到高试；全部搜不到
 // 才打开手动选源表（改词/别名重试）。
 // ============================================================
+// 源提前实测（2026-11-11 用户定：源要提前测试好，哪个是最优的；
+// 5 秒没进去就是失败；要看得见每个源是不能用还是延迟高）。
+// 详情页打开就后台测一集在各源的状态（能播/播不了、解析延迟），
+// 点播直接用测好的最优源，不用等播失败了再一个个换。
+// ============================================================
+const SRC_TEST_TTL_MS = 15 * 60 * 1000; // 实测结果 15 分钟内有效
+const SRC_TEST_TIMEOUT_MS = 5000; // 单个源解析实测 5 秒没出结果就是失败
+function srcTestKey(bid, epNum) { return "srcTest:" + bid + ":" + epNum; }
+function readSrcTest(bid, epNum) {
+  try {
+    const o = JSON.parse(localStorage.getItem(srcTestKey(bid, epNum)) || "null");
+    if (o && Date.now() - o.at < SRC_TEST_TTL_MS) return o.results;
+  } catch (_) {}
+  return null;
+}
+function writeSrcTest(bid, epNum, results) {
+  try { localStorage.setItem(srcTestKey(bid, epNum), JSON.stringify({ at: Date.now(), results })); } catch (_) {}
+}
+// 解析实测单个源：返回 { plugin, ok, ms, reason, data }
+async function testResolve(plugin, episodeUrl, timeoutMs) {
+  const s = performance.now();
+  try {
+    const r = await fetchWithTimeout("/api/resolve?plugin=" + encodeURIComponent(plugin) + "&episodeUrl=" + encodeURIComponent(episodeUrl), {}, timeoutMs || SRC_TEST_TIMEOUT_MS);
+    const ms = Math.round(performance.now() - s);
+    if (!r.ok) return { plugin, ok: false, ms, reason: "HTTP " + r.status };
+    return { plugin, ok: true, ms, data: await r.json() };
+  } catch (e) {
+    return { plugin, ok: false, ms: Math.round(performance.now() - s), reason: e && e.name === "AbortError" ? "超时" : "解析失败" };
+  }
+}
+// 解析结果缓存：测好的源点播时直接用，不用再解析一次（15 分钟内有效）。
+function srcResolveCacheKey(plugin, episodeUrl) { return "srcResolve:" + plugin + "|" + episodeUrl; }
+function getCachedResolve(plugin, episodeUrl) {
+  try {
+    const o = JSON.parse(localStorage.getItem(srcResolveCacheKey(plugin, episodeUrl)) || "null");
+    if (o && Date.now() - o.at < SRC_TEST_TTL_MS) return o;
+  } catch (_) {}
+  return null;
+}
+function setCachedResolve(plugin, episodeUrl, data, ms) {
+  try { localStorage.setItem(srcResolveCacheKey(plugin, episodeUrl), JSON.stringify({ at: Date.now(), data, ms })); } catch (_) {}
+}
+// 实测一集在各源的状态。搜+取集数并行；解析逐个测（后端一次只能处理一个解析，
+// 并发会卡住）。onUpdate(results, done) 每次有新结果就回调一次，页面边测边显示。
+// 返回按“能播优先、延迟从低到高”排好的结果数组。
+async function pretestEpisodeSources(bangumi, epNum, onUpdate) {
+  const bid = String(bangumi.id);
+  const cached = readSrcTest(bid, epNum);
+  if (cached) { if (onUpdate) onUpdate(cached.slice(), true); return cached.slice(); }
+  const title = bangumi.nameCn || bangumi.name;
+  const titles = [];
+  if (bangumi.nameCn) titles.push(bangumi.nameCn);
+  if (bangumi.name && bangumi.name !== bangumi.nameCn) titles.push(bangumi.name);
+  if (!titles.length) titles.push(title);
+  let plugins = [];
+  try { plugins = await fetchJson("/api/plugins"); } catch (_) { return []; }
+  if (!plugins.length) return [];
+  const cands = await Promise.all(plugins.map(async (p) => {
+    try {
+      const r = await pluginSearchBest(p.name, titles);
+      const best = r && r.best && r.best.score >= 20 ? r.best : null;
+      if (!best) return { plugin: p.name, state: "noResult", reason: "搜不到", ms: 0, score: 0 };
+      let info = null;
+      try { info = await loadRoadsAndHistory(p.name, best.item.src, bid); } catch (_) { return { plugin: p.name, state: "noEp", reason: "取集数失败", ms: 0, score: best.score }; }
+      const ep = ((info.roads || []).map((x) => ((x.episodes || [])[epNum - 1])).find(Boolean)) || null;
+      if (!ep) return { plugin: p.name, state: "noEp", reason: "没这集", ms: 0, score: best.score };
+      return { plugin: p.name, state: "pending", score: best.score, epSrc: ep.src };
+    } catch (_) { return { plugin: p.name, state: "noResult", reason: "搜不到", ms: 0, score: 0 }; }
+  }));
+  let clean = { clean: {}, dirty: [] };
+  try { clean = await loadCleanSources(); } catch (_) {}
+  const isClean = (n) => (clean.clean && clean.clean[n]) ? 0 : 1;
+  const toTest = cands.filter((c) => c.epSrc).sort((a, b) => (b.score - a.score) || (isClean(a.plugin) - isClean(b.plugin)));
+  const done0 = cands.filter((c) => !c.epSrc);
+  const emit = (done) => { if (onUpdate) onUpdate(toTest.concat(done0).map((o) => ({ plugin: o.plugin, state: o.state, ms: o.ms || 0, reason: o.reason || "" })), done); };
+  emit(false);
+  for (const c of toTest) {
+    const t = await testResolve(c.plugin, c.epSrc);
+    c.state = t.ok ? "ok" : "fail";
+    c.ms = t.ms;
+    c.reason = t.ok ? "" : t.reason;
+    if (t.ok) setCachedResolve(c.plugin, c.epSrc, t.data, t.ms);
+    emit(false);
+  }
+  const ordered = toTest.concat(done0).sort((a, b) => {
+    const ao = a.state === "ok" ? 0 : 1, bo = b.state === "ok" ? 0 : 1;
+    return (ao - bo) || ((a.ms || 0) - (b.ms || 0));
+  });
+  const out = ordered.map((o) => ({ plugin: o.plugin, state: o.state, ms: o.ms || 0, reason: o.reason || "" }));
+  writeSrcTest(bid, epNum, out);
+  if (onUpdate) onUpdate(out.slice(), true);
+  return out;
+}
+function srcStatusText(results, done) {
+  if (!results || !results.length) return done ? "没有可用规则" : "正在测哪个源能播…";
+  const best = results.find((r) => r.state === "ok");
+  const tested = results.filter((r) => r.state === "ok" || r.state === "fail").length;
+  const head = best
+    ? "最优源：" + best.plugin + "（" + (best.ms / 1000).toFixed(1) + " 秒）"
+    : (done ? "这集暂时没有能播的源" : "测速中 " + tested + "/" + results.length);
+  const parts = results.map((r) => {
+    if (r.state === "ok") return r.plugin + " " + (r.ms / 1000).toFixed(1) + "s ✓";
+    if (r.state === "fail") return r.plugin + " " + (r.reason || "播不了") + " ✗";
+    if (r.state === "pending") return r.plugin + " 测速中…";
+    return r.plugin + " " + (r.reason || "无此剧");
+  });
+  return head + " · " + parts.join(" · ");
+}
+
+// ============================================================
 async function autoPlayBangumi(bangumi) {
   const title = bangumi.nameCn || bangumi.name;
   let plugins = [];
@@ -3650,6 +3770,7 @@ async function autoPlayBangumi(bangumi) {
       const checks = await Promise.all(usable.map(async (r) => {
         try {
           const info = await loadRoadsAndHistory(r.name, r.best.item.src, String(bangumi.id));
+          r._roadsInfo = info; // 留给下面解析实测复用，不用再取一次选集
           const roads = (info && info.roads) || [];
           const n = roads.length ? Math.max.apply(null, roads.map((x) => ((x.episodes || []).length))) : 0;
           return n >= need;
@@ -3661,12 +3782,42 @@ async function autoPlayBangumi(bangumi) {
   } catch (_) {}
   const fresh = usable.filter((r) => !pluginFailedRecently(r.name));
   if (fresh.length) usable = fresh;
+  // 2026-11-11：选源要提前实测解析，不只看搜索延迟——搜得快不等于播得出
+  // （AGE 搜 1.6 秒，解析吞噬第 1 集 20 秒超时）。按排名逐个实测解析（5 秒一个），
+  // 第一个能解析的才是真正最优源；详情页后台实测过的结果优先用，不用重测。
   if (usable.length) {
-    const best = usable[0];
-    localStorage.setItem("lastPlugin", best.name);
-    toast("已选最快的源：" + best.name + "（延迟 " + (best.ms / 1000).toFixed(1) + " 秒）");
-    startPlayback({ plugin: best.name, src: best.best.item.src, title, bid: String(bangumi.id) });
-    return;
+    const withRoads = await Promise.all(usable.map(async (cand) => {
+      if (cand._roadsInfo) return { cand, info: cand._roadsInfo };
+      try { return { cand, info: await loadRoadsAndHistory(cand.name, cand.best.item.src, String(bangumi.id)) }; }
+      catch (_) { return { cand, info: null }; }
+    }));
+    const targetEp = (withRoads[0] && withRoads[0].info && withRoads[0].info.lastWatched && withRoads[0].info.lastWatched.episode) || 1;
+    const pretested = (readSrcTest(String(bangumi.id), targetEp) || []).filter((x) => x.state === "ok").map((x) => x.plugin);
+    const order = withRoads.slice().sort((a, b) => {
+      const ai = pretested.indexOf(a.cand.name), bi = pretested.indexOf(b.cand.name);
+      return (ai < 0 ? 1e9 : ai) - (bi < 0 ? 1e9 : bi);
+    });
+    for (const { cand, info } of order) {
+      if (!info) continue;
+      const lw = info.lastWatched;
+      const epIdx = (lw && lw.episode ? lw.episode - 1 : 0);
+      const ep = ((info.roads || []).map((x) => ((x.episodes || [])[epIdx])).find(Boolean)) || null;
+      if (!ep) continue;
+      const cached = getCachedResolve(cand.name, ep.src);
+      let t;
+      if (cached) {
+        t = { plugin: cand.name, ok: true, ms: cached.ms, data: cached.data };
+      } else {
+        toast("正在测 " + cand.name + " 能不能播…");
+        t = await testResolve(cand.name, ep.src);
+        if (t.ok) setCachedResolve(cand.name, ep.src, t.data, t.ms);
+      }
+      if (!t.ok) continue;
+      localStorage.setItem("lastPlugin", cand.name);
+      toast("已选最优源：" + cand.name + "（解析 " + (t.ms / 1000).toFixed(1) + " 秒）");
+      startPlayback({ plugin: cand.name, src: cand.best.item.src, title, bid: String(bangumi.id), roads: info.roads, lastWatched: info.lastWatched });
+      return;
+    }
   }
   openSourcePicker(bangumi);
 }
@@ -3894,12 +4045,17 @@ function playEpisodeParams(ctx, ep, epIdx, roadIdx) {
 async function startPlayback(ctx) {
   toast("正在获取选集…");
   let info;
-  try {
-    info = await loadRoadsAndHistory(ctx.plugin, ctx.src, ctx.bid);
-  } catch (e) {
-    toast("获取选集失败：" + e.message);
-    go("/episodes", { plugin: ctx.plugin, src: ctx.src, title: ctx.title, bid: ctx.bid });
-    return;
+  if (ctx.roads) {
+    // autoPlay 已取过选集，不用再取一次。
+    info = { roads: ctx.roads, lastWatched: ctx.lastWatched || null };
+  } else {
+    try {
+      info = await loadRoadsAndHistory(ctx.plugin, ctx.src, ctx.bid);
+    } catch (e) {
+      toast("获取选集失败：" + e.message);
+      go("/episodes", { plugin: ctx.plugin, src: ctx.src, title: ctx.title, bid: ctx.bid });
+      return;
+    }
   }
   const lw = info.lastWatched;
   let roadIdx = lw && info.roads[lw.road] ? lw.road : 0;
